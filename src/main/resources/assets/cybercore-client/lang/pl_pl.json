@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "Otwórz przeglądarkę CyberCore",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "Adres URL bazowy",
+  "gui.cybercore.config.update_cache": "Odśwież pamięć podręczną",
+  "gui.cybercore.browser.title": "Przeglądarka",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}

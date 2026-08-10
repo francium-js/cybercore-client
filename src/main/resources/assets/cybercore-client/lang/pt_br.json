@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "Abrir o navegador CyberCore",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "URL base",
+  "gui.cybercore.config.update_cache": "Atualizar cache",
+  "gui.cybercore.browser.title": "Navegador",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}

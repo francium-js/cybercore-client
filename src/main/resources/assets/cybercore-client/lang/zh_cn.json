@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "打开 CyberCore 浏览器",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "基础网址",
+  "gui.cybercore.config.update_cache": "更新缓存",
+  "gui.cybercore.browser.title": "浏览器",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}

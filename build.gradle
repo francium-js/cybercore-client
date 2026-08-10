@@ -1,0 +1,141 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version '1.17.1'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+loom {
+    splitEnvironmentSourceSets()
+    productionNamespace = "official"
+
+    mods {
+        "cybercore-client" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+
+fabricApi {
+    configureDataGeneration {
+        client = true
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' } // MCEF (CCBlueX)
+    maven { url 'https://maven.terraformersmc.com/' } // Mod Menu
+}
+
+dependencies {
+    // To change the versions see the gradle.properties file
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // MCEF (CCBlueX fork) - the Chromium/CEF browser library. It exposes CEF's accelerated-paint
+    // path: on Windows/Linux/macOS the finished frame stays on the GPU (D3D11 shared handle /
+    // dmabuf / IOSurface) instead of being copied out to a CPU buffer and re-uploaded - see
+    // McefBootstrap.
+    // Same namespace reasoning as Mod Menu below: on MC 26.1 Loom no longer creates the mod*
+    // configurations, everything is built in the official (Mojang) namespace, so plain
+    // implementation is what works.
+    // Nested, so a player installs one file instead of hunting for a library MCEF publishes only
+    // through JitPack and its own Maven - it is on no mod platform. LGPL-2.1 is satisfied by
+    // nesting rather than merging: META-INF/jars/mcef-*.jar stays the unmodified upstream artifact
+    // and a player can drop a different build into mods/ to override it (a loose mod wins over a
+    // nested one). Attribution and the source link live in THIRD-PARTY.md, which ships in the jar.
+    include(implementation("com.github.CCBlueX:mcef:${project.mcef_version}"))
+
+    // MCEF compiles against libraries that neither Minecraft nor Fabric ship, and does not bundle
+    // them either (LiquidBounce, its only real consumer, already has them on the classpath):
+    //   okhttp/okio/kotlin - utils/FileUtils downloads and unpacks the Chromium runtime,
+    //   lwjgl-egl          - EglUtils, which MCEFAccelerationSupport imports at class level, so it
+    //                        is needed on every platform and not just on Linux.
+    // Nested with include() so a player still installs a single jar. commons-compress/io/codec and
+    // guava are already on Minecraft's own classpath and must NOT be nested on top of it.
+    include(implementation("com.squareup.okhttp3:okhttp:${project.okhttp_version}"))
+    include(implementation("com.squareup.okio:okio-jvm:${project.okio_version}"))
+    include(implementation("org.jetbrains.kotlin:kotlin-stdlib:${project.kotlin_stdlib_version}"))
+    include(implementation("org.lwjgl:lwjgl-egl:${project.lwjgl_egl_version}"))
+
+    // Mod Menu - provides the in-game mods list and the per-mod config button. Same namespace
+    // reasoning as MCEF above, so use implementation here too.
+    implementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "minecraft_version", project.minecraft_version
+    inputs.property "loader_version", project.loader_version
+    filteringCharset "UTF-8"
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version,
+                "minecraft_version": project.minecraft_version,
+                "loader_version": project.loader_version
+    }
+}
+
+def targetJavaVersion = 25
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = "UTF-8"
+    if (targetJavaVersion >= 10 || JavaVersion.current().isJava10Compatible()) {
+        it.options.release.set(targetJavaVersion)
+    }
+}
+
+java {
+    def javaVersion = JavaVersion.toVersion(targetJavaVersion)
+    if (JavaVersion.current() < javaVersion) {
+        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    }
+    withSourcesJar()
+}
+
+jar {
+    from("LICENSE.txt") {
+        rename { "LICENSE_${project.archives_base_name}.txt" }
+    }
+    // LGPL attribution for the nested MCEF, plus the notices for everything else in META-INF/jars.
+    from("THIRD-PARTY.md")
+}
+
+// Automatically copy the built (remapped) jar into the Modrinth profile's mods folder
+// after every build, so the latest mod is always installed there.
+def modrinthProfileMods = file("${System.getProperty('user.home')}/Library/Application Support/ModrinthApp/profiles/Fabulously Optimized/mods")
+
+tasks.register('copyToProfile', Copy) {
+    dependsOn tasks.named('jar')
+    from tasks.named('jar')
+    into modrinthProfileMods
+    doFirst {
+        if (!modrinthProfileMods.exists()) {
+            throw new GradleException("Modrinth profile mods folder not found: ${modrinthProfileMods}")
+        }
+    }
+    doLast {
+        println "Copied ${project.base.archivesName.get()}-${project.version}.jar to ${modrinthProfileMods}"
+    }
+}
+
+tasks.named('build') {
+    finalizedBy tasks.named('copyToProfile')
+}
+
+publishing {
+    publications {
+        create("mavenJava", MavenPublication) {
+            artifactId = project.archives_base_name
+            from components.java
+        }
+    }
+}

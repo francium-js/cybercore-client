@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "Avaa CyberCore-selain",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "Perus-URL",
+  "gui.cybercore.config.update_cache": "Päivitä välimuisti",
+  "gui.cybercore.browser.title": "Selain",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}

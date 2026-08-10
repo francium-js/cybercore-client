@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "CyberCore böngésző megnyitása",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "Alap URL",
+  "gui.cybercore.config.update_cache": "Gyorsítótár frissítése",
+  "gui.cybercore.browser.title": "Böngésző",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}

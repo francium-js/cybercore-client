@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "cybercore-client",
+  "version": "${version}",
+  "name": "CyberCore Client",
+  "description": "Client-side mod that embeds a Chromium browser overlay (powered by MCEF) into Minecraft and connects it to the CyberCore web app. Press B to toggle the overlay; player position and client events are bridged to the page, and the base URL is configurable through Mod Menu.",
+  "authors": [
+    "francium-js"
+  ],
+  "contact": {
+    "homepage": "https://github.com/francium-js/cybercore-client",
+    "sources": "https://github.com/francium-js/cybercore-client",
+    "issues": "https://github.com/francium-js/cybercore-client/issues"
+  },
+  "license": "MIT",
+  "icon": "assets/cybercore-client/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.francium.cybercoreClient.client.CybercoreClientDataGenerator"
+    ],
+    "client": [
+      "org.francium.cybercoreClient.client.CybercoreClientClient"
+    ],
+    "main": [
+      "org.francium.cybercoreClient.CybercoreClient"
+    ],
+    "modmenu": [
+      "org.francium.cybercoreClient.client.CybercoreModMenu"
+    ]
+  },
+  "mixins": [
+    "cybercore-client.mixins.json",
+    {
+      "config": "cybercore-client.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "mcef": ">=3.3.0-26.1",
+    "minecraft": "${minecraft_version}"
+  },
+  "suggests": {
+    "modmenu": "*"
+  }
+}

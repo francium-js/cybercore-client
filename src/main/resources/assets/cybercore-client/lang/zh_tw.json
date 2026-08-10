@@ -1,0 +1,8 @@
+{
+  "key.cybercore.browser": "開啟 CyberCore 瀏覽器",
+  "gui.cybercore.config.title": "CyberCore",
+  "gui.cybercore.config.base_url": "基礎網址",
+  "gui.cybercore.config.update_cache": "更新快取",
+  "gui.cybercore.browser.title": "瀏覽器",
+  "key.category.cybercore-client.cybercore": "CyberCore"
+}
