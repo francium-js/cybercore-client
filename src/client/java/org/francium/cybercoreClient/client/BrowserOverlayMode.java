@@ -102,6 +102,10 @@ final class BrowserOverlayMode {
     /** The mod's intent: true means the in-game screen is closed. */
     static void set(boolean overlay) {
         wantOverlay = overlay;
+        // An ack from before this switch is about the previous state. A quick open/close would
+        // otherwise reuse pageOverlay=true from the last parked session and paint the platform
+        // frame still sitting in the texture; a fresh ack re-engages the paint hold instead.
+        acked = false;
         fallbackEngaged = false;
         send();
     }
