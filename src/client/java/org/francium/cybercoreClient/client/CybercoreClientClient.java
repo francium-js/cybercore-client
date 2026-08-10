@@ -1,7 +1,6 @@
 package org.francium.cybercoreClient.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
-import com.mojang.blaze3d.platform.Window;
 import net.ccbluex.liquidbounce.mcef.MCEF;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowser;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowserSettings;
@@ -92,7 +91,6 @@ public class CybercoreClientClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             refreshDisplayScale(client);
-            syncBrowserFrameRate(client);
             BrowserLoadGuard.tick();
             BrowserOverlayMode.tick();
 
@@ -355,89 +353,18 @@ public class CybercoreClientClient implements ClientModInitializer {
         ensureBrowser();
     }
 
-    private static final int FALLBACK_BROWSER_FPS = 60;
-
-    /** Rate while only the overlay is on screen and nothing is interactive. */
-    private static final int IDLE_BROWSER_FPS = 30;
-    private static final int MIN_ACTIVE_BROWSER_FPS = 30;
-
     /** A shared-texture frame never touches the CPU, so it may track the monitor. */
     private static final int MAX_ACCELERATED_BROWSER_FPS = 240;
 
     /** Every software frame is copied out of CEF and re-uploaded, so it stays cheap. */
     private static final int MAX_SOFTWARE_BROWSER_FPS = 60;
 
-    /** Ignore fps wobble below this, so the rate is not re-applied through JNI every tick. */
-    private static final int FRAME_RATE_STICKINESS = 10;
-
-    private static int lastAppliedFrameRate;
-
-    /**
-     * Tracks Minecraft's own frame rate: a browser frame is only ever seen if the game draws one,
-     * so producing more than that is waste. Drops to idle whenever the browser screen is closed.
-     */
-    private static int desiredFrameRate(Minecraft client) {
-        if (!(client.screen instanceof BrowserScreen)) {
-            return IDLE_BROWSER_FPS;
-        }
-        int measured = client.getFps();
-        if (measured <= 0) {
-            measured = FALLBACK_BROWSER_FPS;
-        }
-        int limit = client.getFramerateLimitTracker().getFramerateLimit();
-        if (limit > 0) {
-            measured = Math.min(measured, limit);
-        }
-
-        boolean accelerated = McefBootstrap.isAcceleratedPaint();
-        int ceiling = accelerated ? MAX_ACCELERATED_BROWSER_FPS : MAX_SOFTWARE_BROWSER_FPS;
-        // The config can pull the ceiling down. Every accepted frame is a full-texture GPU copy,
-        // and on Windows a shared-texture import where a cache miss costs a glFinish - at
-        // fullscreen that can stutter, and capping the browser to 60 trades top rate for
-        // smoothness. The default leaves the rate alone; the trade-off is the player's to make.
-        ceiling = Math.min(ceiling, CybercoreConfig.getBrowserMaxFps());
-
-        // Never above the game's rate: MCEF's Windows backend caches only four imported shared
-        // textures, and every miss costs a glFinish, so extra frames in flight are paid for twice.
-        int target = Math.clamp(measured, MIN_ACTIVE_BROWSER_FPS, ceiling);
-
-        if (Math.abs(target - lastAppliedFrameRate) < FRAME_RATE_STICKINESS) {
-            return lastAppliedFrameRate;
-        }
-        return target;
-    }
-
-    /** Ticks left in which the windowless frame rate must be left alone. */
-    private static int frameRateHoldTicks = 0;
-
-    /**
-     * A quarter of a second, which covers a route switch and the paint that follows it.
-     *
-     * <p>Reconfiguring the windowless frame rate re-arms CEF's BeginFrame source, and a page that
-     * has just gone static produces exactly one frame for the new route - lose it and the previous
-     * one stays in the shared texture with nothing left to overwrite it. Closing the screen changes
-     * the route and drops the rate to idle in consecutive ticks, so the two are held apart.
-     */
-    private static final int FRAME_RATE_HOLD_TICKS = 5;
-
-    static void holdFrameRate() {
-        frameRateHoldTicks = FRAME_RATE_HOLD_TICKS;
-    }
-
-    private static void syncBrowserFrameRate(Minecraft client) {
-        if (browser == null) {
-            return;
-        }
-        if (frameRateHoldTicks > 0) {
-            frameRateHoldTicks--;
-            return;
-        }
-        int target = desiredFrameRate(client);
-        if (target == lastAppliedFrameRate) {
-            return;
-        }
-        browser.setWindowlessFrameRate(target);
-        lastAppliedFrameRate = target;
+    /** Applied once at creation: re-arming CEF's BeginFrame source mid-flight can drop a frame. */
+    private static int maxFrameRate() {
+        int ceiling = McefBootstrap.isAcceleratedPaint()
+                ? MAX_ACCELERATED_BROWSER_FPS
+                : MAX_SOFTWARE_BROWSER_FPS;
+        return Math.min(ceiling, CybercoreConfig.getBrowserMaxFps());
     }
 
     /**
@@ -516,7 +443,6 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     private static void navigate(MCEFBrowser b, String path) {
         String absolute = pageUrl(path);
-        holdFrameRate();
 
         // Parked on the blank page (site was down): there is no app to route, so go straight
         // for a real load - which doubles as an instant retry when the player presses B.
@@ -544,17 +470,16 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static CybercoreBrowser createBrowser(String url) {
         // Built by hand instead of MCEF.createBrowser, which hardwires the base class: ours is the
         // same browser plus a frame-delivery timestamp, which the overlay's paint gate relies on.
-        // Starts parked on the overlay page, hence the idle rate. shared_texture is only requested
-        // when the platform probe accepted it - CEF ignores an unsupported request silently.
+        // shared_texture is only requested when the platform probe accepted it - CEF ignores an
+        // unsupported request silently.
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
                 withVanishBg(url),
                 true,
-                new MCEFBrowserSettings(IDLE_BROWSER_FPS, McefBootstrap.isAcceleratedPaint())
+                new MCEFBrowserSettings(maxFrameRate(), McefBootstrap.isAcceleratedPaint())
         );
         b.setCloseAllowed();
         b.createImmediately();
-        lastAppliedFrameRate = IDLE_BROWSER_FPS;
         return b;
     }
 
