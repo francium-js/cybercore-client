@@ -91,6 +91,7 @@ public class CybercoreClientClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             refreshDisplayScale(client);
+            syncBrowserFrameRate();
             BrowserLoadGuard.tick();
             BrowserOverlayMode.tick();
 
@@ -359,12 +360,30 @@ public class CybercoreClientClient implements ClientModInitializer {
     /** Every software frame is copied out of CEF and re-uploaded, so it stays cheap. */
     private static final int MAX_SOFTWARE_BROWSER_FPS = 60;
 
-    /** Applied once at creation: re-arming CEF's BeginFrame source mid-flight can drop a frame. */
+    private static int lastAppliedFrameRate;
+
     private static int maxFrameRate() {
         int ceiling = McefBootstrap.isAcceleratedPaint()
                 ? MAX_ACCELERATED_BROWSER_FPS
                 : MAX_SOFTWARE_BROWSER_FPS;
+        // Frames above the monitor's refresh rate can never be seen.
+        int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
+        if (refreshRate > 0) {
+            ceiling = Math.min(ceiling, refreshRate);
+        }
         return Math.min(ceiling, CybercoreConfig.getBrowserMaxFps());
+    }
+
+    /** Reapplies only when the window lands on a monitor with a different refresh rate. */
+    private static void syncBrowserFrameRate() {
+        if (browser == null) {
+            return;
+        }
+        int target = maxFrameRate();
+        if (target != lastAppliedFrameRate) {
+            browser.setWindowlessFrameRate(target);
+            lastAppliedFrameRate = target;
+        }
     }
 
     /**
@@ -472,14 +491,16 @@ public class CybercoreClientClient implements ClientModInitializer {
         // same browser plus a frame-delivery timestamp, which the overlay's paint gate relies on.
         // shared_texture is only requested when the platform probe accepted it - CEF ignores an
         // unsupported request silently.
+        int frameRate = maxFrameRate();
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
                 withVanishBg(url),
                 true,
-                new MCEFBrowserSettings(maxFrameRate(), McefBootstrap.isAcceleratedPaint())
+                new MCEFBrowserSettings(frameRate, McefBootstrap.isAcceleratedPaint())
         );
         b.setCloseAllowed();
         b.createImmediately();
+        lastAppliedFrameRate = frameRate;
         return b;
     }
 
