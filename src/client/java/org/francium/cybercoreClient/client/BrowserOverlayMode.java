@@ -106,6 +106,9 @@ final class BrowserOverlayMode {
         // otherwise reuse pageOverlay=true from the last parked session and paint the platform
         // frame still sitting in the texture; a fresh ack re-engages the paint hold instead.
         acked = false;
+        // Silence is measured from this request, not from the previous one - a counter carried
+        // over from an unfinished earlier switch would trip the fallback navigation early.
+        ticksDisagreeing = 0;
         fallbackEngaged = false;
         send();
     }
