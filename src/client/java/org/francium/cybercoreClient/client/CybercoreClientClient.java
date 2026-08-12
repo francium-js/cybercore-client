@@ -347,6 +347,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserEscapeBridge.register();
             BrowserScaleBridge.register();
             BrowserConsoleLog.register();
+            BrowserCrashGuard.register();
             registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
