@@ -211,6 +211,7 @@ public class CybercoreClientClient implements ClientModInitializer {
         ticksSinceReassert = 0;
         notifyPlatformOpen(platformShown);
         sendLegacyOverlayFlag(!platformShown);
+        syncBrowserZoom(true);
     }
 
     private static void sendLegacyOverlayFlag(boolean overlay) {
@@ -321,17 +322,21 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static volatile float contentScale = 1f;
 
     /**
-     * The scale Chromium actually sees: the OS content scale times the player's manual
-     * percentage from the site's settings page. The multiplier exists because the OS value
-     * cannot be trusted everywhere - Linux Xft.dpi/Wayland setups lie about it routinely.
+     * The scale CybercoreBrowser reports to Chromium and converts sizes and mouse coordinates
+     * against. Deliberately NOT multiplied by the player's manual scale: this jcef build has no
+     * notifyScreenInfoChanged binding, so Chromium reads the device scale factor once at browser
+     * creation and never again - feeding a different value into the DIP conversion mid-life
+     * desyncs mouse coordinates from what Chromium believes and bricks the page. The player's
+     * multiplier rides on page zoom instead (see syncBrowserZoom), which does work on a live
+     * browser.
      */
     static float displayScale() {
-        return contentScale * CybercoreConfig.getBrowserScalePercent() / 100f;
+        return contentScale;
     }
 
     /**
-     * Applies the scale the player picked in the site's settings (see BrowserScaleBridge) and
-     * persists it, so the next launch boots with it already in place.
+     * Persists the scale the player picked in the site's settings (see BrowserScaleBridge).
+     * {@link #syncBrowserZoom} picks it up on the next tick.
      */
     static void applyUserBrowserScale(int percent) {
         int clamped = Math.max(CybercoreConfig.MIN_BROWSER_SCALE_PERCENT,
@@ -340,16 +345,6 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         CybercoreConfig.setBrowserScalePercent(clamped);
-        // The software path picks the new factor up through a resize: the framebuffer size is
-        // unchanged, but the DIP conversion in CybercoreBrowser now lands on different numbers,
-        // and WasResized makes CEF re-query getScreenInfo. BrowserScreen/BrowserOverlay only
-        // resize when the framebuffer changes, so this one is on us. The accelerated path keeps
-        // its size and gets the zoom fallback on the next tick (refreshDisplayScale) instead -
-        // resizing there risks the frame filter dropping every frame.
-        if (browser != null && !McefBootstrap.isAcceleratedPaint()) {
-            var window = Minecraft.getInstance().getWindow();
-            browser.resize(Math.max(1, window.getWidth()), Math.max(1, window.getHeight()));
-        }
     }
 
     private static double lastAppliedZoom = 0;
@@ -365,14 +360,29 @@ public class CybercoreClientClient implements ClientModInitializer {
             }
         }
 
-        // The accelerated path runs at scale 1 (see CybercoreBrowser) and falls back on zoom for
-        // OS display scaling - the pre-HiDPI behavior, kept because it is the one that works there.
-        if (browser != null && McefBootstrap.isAcceleratedPaint()) {
-            double zoom = Math.log(displayScale()) / Math.log(1.2);
-            if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
-                browser.setZoomLevel(zoom);
-                lastAppliedZoom = zoom;
-            }
+        syncBrowserZoom(false);
+    }
+
+    /**
+     * Page zoom is where the player's manual scale lives - the one scaling knob this jcef build
+     * can turn on a live browser, and it is exactly what ctrl+/- does in a desktop browser: the
+     * layout rescales, hit-testing follows, and the raster stays at the device scale, so nothing
+     * goes soft. The accelerated path additionally folds the OS scale in, since it runs Chromium
+     * at device scale 1 (see CybercoreBrowser).
+     *
+     * @param force reapply even if unchanged - the once-a-second reassert, in case a reload or
+     *              navigation dropped the per-host zoom entry.
+     */
+    private static void syncBrowserZoom(boolean force) {
+        if (browser == null) {
+            return;
+        }
+        double userScale = CybercoreConfig.getBrowserScalePercent() / 100.0;
+        double targetScale = McefBootstrap.isAcceleratedPaint() ? contentScale * userScale : userScale;
+        double zoom = Math.log(targetScale) / Math.log(1.2);
+        if (force || Math.abs(zoom - lastAppliedZoom) > 0.001) {
+            browser.setZoomLevel(zoom);
+            lastAppliedZoom = zoom;
         }
     }
 
