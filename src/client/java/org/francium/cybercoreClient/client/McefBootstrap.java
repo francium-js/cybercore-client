@@ -122,9 +122,16 @@ public final class McefBootstrap {
      * MCEF's probe is narrow - on Windows only NVIDIA and AMD pass - and anything it rejects falls
      * back to the copy path.
      */
+    /** Re-runs the probe after the player flips the GPU/CPU choice (see BrowserAccelBridge). */
+    static void reapplyAccelerationSupport() {
+        if (isReady()) {
+            resolveAccelerationSupport();
+        }
+    }
+
     private static void resolveAccelerationSupport() {
-        // Opt-in via config: MCEF can lose a shared frame silently mid-import, and a lost frame
-        // is a stale picture frozen over the world (see CybercoreConfig for the full story).
+        // The config gates the GPU path: MCEF can lose a shared frame silently mid-import, and
+        // some machines are better off on software frames (see CybercoreConfig for the story).
         if (!CybercoreConfig.isAcceleratedPaintAllowed()) {
             LOGGER.info("GPU-shared browser frames are disabled by config; using software frames.");
             acceleratedPaint = false;

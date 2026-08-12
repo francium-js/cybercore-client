@@ -192,10 +192,10 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
         platformShown = false;
         platformClosedAtNanos = System.nanoTime();
-        // Insurance for the accelerated path's frame filter: a few ticks from now - enough for
-        // the collapse flag to land and the CSS flip to apply - force one full-damage repaint,
-        // so the texture always ends up showing the post-toggle state.
-        toggleInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
+        // Hard-close the gate: nothing goes over the world until the page confirms the collapse
+        // AND a frame painted after that confirmation lands. The repaint train in
+        // tickPaintFreshness does the rest.
+        collapseBarNanos = Long.MAX_VALUE;
         gateBlockedTicks = 0;
         gateWarned = false;
         LOGGER.info("Platform screen closed.");
@@ -204,14 +204,42 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     // ---- Paint freshness ----------------------------------------------------------------------
     //
-    // The moment the platform closes, the browser texture still holds the platform's last frame.
-    // A healthy page paints its collapsed state within a frame or two and the clock moves past
-    // the close stamp; a hung or dead renderer never paints again, and without this gate the mod
-    // would keep drawing that frozen platform frame over the world forever.
+    // The moment the platform closes, the browser texture still holds the platform's last frame,
+    // and "a frame arrived after the close" is not proof of anything better: frames flow
+    // continuously, so the first one after the close can honestly carry the pre-collapse picture,
+    // while the frame with the collapsed state is exactly the one MCEF's shared-frame import can
+    // lose without a trace (importFrame returning null skips it silently). So the bar the clock
+    // must clear is not the close - it is the page's own confirmation that the collapse was
+    // applied (the "[cc-page] overlay applied" console trace): a frame painted after that moment
+    // cannot show the platform. Until such a frame lands, nothing is drawn over the world and
+    // full repaints are forced in a steady train - CEF cycles through a pool of shared textures,
+    // so a train beats an import failure that eats any single frame.
 
     private static volatile long lastPaintNanos = Long.MIN_VALUE;
 
+    /** {@link Long#MAX_VALUE} while waiting for the page to confirm the collapse. */
+    private static volatile long collapseBarNanos = Long.MAX_VALUE;
+
     private static volatile long platformClosedAtNanos = 0;
+
+    /**
+     * The page confirmed the overlay state (relayed console trace, see BrowserCollapseAckBridge).
+     * Only the first confirmation after a close sets the bar - the later heartbeats re-state the
+     * same fact and must not push the bar forward past frames that were already valid.
+     */
+    static void noteOverlayApplied(boolean overlay) {
+        if (!overlay || platformShown) {
+            return;
+        }
+        if (collapseBarNanos == Long.MAX_VALUE) {
+            collapseBarNanos = System.nanoTime();
+        }
+    }
+
+    /** Whether the texture provably holds a frame painted after the page collapsed the platform. */
+    static boolean mayDrawOverlay() {
+        return lastPaintNanos - collapseBarNanos > 0;
+    }
 
     /** Called from CEF's paint threads (see CybercoreBrowser). */
     static void notePaint() {
@@ -221,17 +249,15 @@ public class CybercoreClientClient implements ClientModInitializer {
         droppedFrameRecoveryArmed = false;
     }
 
-    /** Whether the texture holds a frame painted after the platform screen last closed. */
-    static boolean hasPaintedSinceClose() {
-        return lastPaintNanos - platformClosedAtNanos > 0;
-    }
-
     private static volatile boolean droppedFrameRecoveryArmed;
 
-    /** ~150 ms: enough for the collapse flag to land and the CSS flip to repaint. */
+    /** ~150 ms: enough for the expand flag to land and the CSS flip to repaint. */
     private static final int CLOSE_INVALIDATE_DELAY_TICKS = 3;
 
     private static int toggleInvalidateTicks = 0;
+
+    /** After ~3 s without confirmation, assume a front-end build without the applied trace. */
+    private static final int LEGACY_FALLBACK_TICKS = 60;
 
     private static final int GATE_WARN_TICKS = 100;
 
@@ -242,17 +268,16 @@ public class CybercoreClientClient implements ClientModInitializer {
     /**
      * The per-tick freshness watchdog.
      *
-     * <p>It fires one unconditional full repaint shortly after every open/close: the freshness
-     * clock can be satisfied honestly by a frame that still shows the pre-toggle picture (frames
-     * flow continuously), while the frame carrying the new state is exactly the one the
-     * accelerated filter or the shared-texture import can eat - the Windows logs showed complete
-     * applied-flag chains with the old picture stuck on screen. One forced full-damage frame per
-     * toggle refreshes the texture through every filter, the same insurance LiquidBounce takes
-     * on every screen change.
+     * <p>While the platform is closed and the gate is shut, it forces a full-damage repaint
+     * every other tick: a single forced frame can be eaten whole by MCEF's silent shared-frame
+     * import failure, but CEF rotates a pool of shared textures, so a steady train lands one.
+     * The moment a frame painted after the page's collapse confirmation arrives, the gate opens
+     * and the train stops - on a healthy machine that is the first or second frame.
      *
-     * <p>It also converts any dropped frame into a repaint (armed until the next accepted frame
-     * disarms it), and shouts into the log when nothing has been accepted for seconds after a
-     * close - the renderer is then hung, and a report's latest.log should say so.
+     * <p>It also converts any filter-dropped frame into a repaint (armed until the next accepted
+     * frame disarms it), falls back to the close-time bar for front-end builds that never send
+     * the confirmation, and shouts into the log when nothing lands for seconds - the renderer is
+     * then hung, and a report's latest.log should say so.
      */
     private static void tickPaintFreshness() {
         if (browser == null) {
@@ -270,14 +295,27 @@ public class CybercoreClientClient implements ClientModInitializer {
             browser.invalidateView();
         }
 
-        if (platformShown || hasPaintedSinceClose()) {
+        if (platformShown || mayDrawOverlay()) {
             gateBlockedTicks = 0;
             gateWarned = false;
             return;
         }
-        if (++gateBlockedTicks >= GATE_WARN_TICKS && !gateWarned) {
+
+        gateBlockedTicks++;
+
+        if (gateBlockedTicks % 2 == 0) {
+            browser.invalidateView();
+        }
+
+        if (gateBlockedTicks == LEGACY_FALLBACK_TICKS && collapseBarNanos == Long.MAX_VALUE) {
+            LOGGER.warn("The page never confirmed the collapse (front-end without the applied "
+                    + "trace?) - falling back to the close-time bar.");
+            collapseBarNanos = platformClosedAtNanos;
+        }
+
+        if (gateBlockedTicks >= GATE_WARN_TICKS && !gateWarned) {
             gateWarned = true;
-            LOGGER.warn("No browser frame accepted for {} ticks after closing the platform - "
+            LOGGER.warn("No confirmed browser frame for {} ticks after closing the platform - "
                     + "the page renderer looks hung.", gateBlockedTicks);
         }
     }
@@ -356,6 +394,8 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserScaleBridge.register();
             BrowserConsoleLog.register();
             BrowserCrashGuard.register();
+            BrowserCollapseAckBridge.register();
+            BrowserAccelBridge.register();
             registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
@@ -376,9 +416,10 @@ public class CybercoreClientClient implements ClientModInitializer {
             // route - a fresh page defaults to "closed" until told otherwise.
             browser = createBrowser(ITEMS_PATH);
             lastAppliedZoom = 0;
-            // A fresh browser holds no picture yet; nothing may go over the world until it
-            // actually paints one.
+            // A fresh browser holds no picture yet; nothing may go over the world until the page
+            // confirms it is in the collapsed state and paints past that confirmation.
             platformClosedAtNanos = System.nanoTime();
+            collapseBarNanos = Long.MAX_VALUE;
         }
     }
 
@@ -392,6 +433,11 @@ public class CybercoreClientClient implements ClientModInitializer {
     }
 
     static void reloadWithNewBaseUrl() {
+        recreateBrowser();
+    }
+
+    /** Full teardown and boot of a fresh browser - for changes fixed at creation time. */
+    private static void recreateBrowser() {
         // An open screen holds a reference to the browser we are about to close.
         Minecraft client = Minecraft.getInstance();
         if (client.screen instanceof BrowserScreen) {
@@ -405,8 +451,31 @@ public class CybercoreClientClient implements ClientModInitializer {
         ensureBrowser();
     }
 
+    /**
+     * The GPU/CPU frame choice from the site's settings (see BrowserAccelBridge). The path is
+     * fixed at browser creation, so a change means persisting and recreating.
+     */
+    static void applyGpuFrames(boolean enabled) {
+        if (enabled == CybercoreConfig.isAcceleratedPaintAllowed()) {
+            return;
+        }
+        CybercoreConfig.setAcceleratedPaintAllowed(enabled);
+        LOGGER.info("GPU-shared frames switched {} from the site settings - recreating the browser.",
+                enabled ? "on" : "off");
+        McefBootstrap.reapplyAccelerationSupport();
+        recreateBrowser();
+    }
+
     /** CEF's own ceiling for the windowless frame rate. */
     private static final int MAX_BROWSER_FPS = 240;
+
+    /**
+     * The CPU path's ceiling. Every software frame is a full readback + copy + texture upload on
+     * the render thread (~15 MB at 1440p); chasing a 180 Hz monitor there starves the game and
+     * delivers jittery frames - a steady 60 both feels smoother and costs a third of the work.
+     * The GPU path hands frames over as handles and can afford the full refresh rate.
+     */
+    private static final int SOFTWARE_MAX_FPS = 60;
 
     /** Used until GLFW reports a real refresh rate for the current monitor. */
     private static final int FALLBACK_BROWSER_FPS = 60;
@@ -414,15 +483,16 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static int lastAppliedFrameRate;
 
     /**
-     * Always the monitor's own refresh rate - no software cap and no config knob. Frames above it
-     * can never be seen, frames below it are visible judder.
+     * The monitor's own refresh rate, capped by what the active rendering path can sustain.
+     * Frames above the refresh rate can never be seen, frames below it are visible judder.
      */
     private static int maxFrameRate() {
+        int pathCap = McefBootstrap.isAcceleratedPaint() ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
         int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
         if (refreshRate <= 0) {
-            return FALLBACK_BROWSER_FPS;
+            return Math.min(FALLBACK_BROWSER_FPS, pathCap);
         }
-        return Math.min(refreshRate, MAX_BROWSER_FPS);
+        return Math.min(refreshRate, pathCap);
     }
 
     /** Reapplies only when the window lands on a monitor with a different refresh rate. */

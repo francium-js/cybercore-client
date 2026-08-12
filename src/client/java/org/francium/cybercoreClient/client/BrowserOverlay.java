@@ -52,10 +52,11 @@ public final class BrowserOverlay {
             lastHeight = fbHeight;
         }
 
-        // Until the page paints a frame newer than the moment the platform closed, the texture
-        // still shows the platform itself. A healthy page repaints within a frame or two; a hung
-        // or crashed renderer never does, and its frozen last frame must not hang over the world.
-        if (!CybercoreClientClient.hasPaintedSinceClose()) {
+        // Until a frame painted AFTER the page confirmed the collapse lands in the texture, it
+        // may still show the platform itself - a frame that is merely newer than the close can
+        // honestly carry the old picture. Whatever fails upstream (hung renderer, lost shared
+        // frame), the failure mode is a clean world, never a frozen platform.
+        if (!CybercoreClientClient.mayDrawOverlay()) {
             return;
         }
 

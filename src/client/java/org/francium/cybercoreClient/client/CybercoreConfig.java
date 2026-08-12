@@ -25,13 +25,13 @@ public final class CybercoreConfig {
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
 
     /**
-     * GPU-shared browser frames are opt-in. The import of a shared frame can fail silently
-     * inside MCEF (importFrame returning null skips the frame with no log), which froze stale
-     * pictures over the world on Windows/NVIDIA, and Intel machines flashed transparent frames -
-     * while the software path has been flawless everywhere it ran. Flip to true to trade that
-     * reliability for the cheaper GPU handoff.
+     * GPU-shared frames by default: they carry the full monitor refresh rate for free, and since
+     * the collapse-ack gate (CybercoreClientClient.mayDrawOverlay) a lost frame can no longer
+     * freeze a stale platform over the world - MCEF's silent import failures now cost at most a
+     * few delayed frames. Machines where the GPU path stays troublesome (weak iGPUs, exotic
+     * drivers) switch to software frames right on the site's settings page, or here.
      */
-    private static final boolean DEFAULT_ACCELERATED_PAINT = false;
+    private static final boolean DEFAULT_ACCELERATED_PAINT = true;
 
     static final int DEFAULT_BROWSER_SCALE_PERCENT = 100;
     static final int MIN_BROWSER_SCALE_PERCENT = 50;
@@ -86,6 +86,11 @@ public final class CybercoreConfig {
 
     static boolean isAcceleratedPaintAllowed() {
         return acceleratedPaint;
+    }
+
+    static void setAcceleratedPaintAllowed(boolean enabled) {
+        acceleratedPaint = enabled;
+        save();
     }
 
     static void setBrowserScalePercent(int percent) {
