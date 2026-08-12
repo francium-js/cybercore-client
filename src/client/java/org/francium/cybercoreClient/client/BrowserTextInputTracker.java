@@ -85,12 +85,8 @@ public final class BrowserTextInputTracker {
         return false;
     }
 
-    /**
-     * Platform browser only: the focus state gates keyboard handling in {@link BrowserScreen},
-     * and only the platform ever has that screen (or focused inputs at all).
-     */
     private static boolean isOurBrowser(CefBrowser browser) {
-        return browser != null && browser == CybercoreClientClient.platformBrowser;
+        return CybercoreClientClient.isOurBrowser(browser);
     }
 
     private static void install(CefFrame frame) {

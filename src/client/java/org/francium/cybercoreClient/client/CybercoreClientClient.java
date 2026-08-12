@@ -19,30 +19,29 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Two browsers, one per surface - the architectural fix for every "the platform stayed on the
- * screen" bug this mod used to chase.
+ * One browser, one app instance, and a single boolean between the two worlds.
  *
- * <p>The overlay browser sits on the transparent in-world page ({@code /nothing}) forever and is
- * the only thing ever painted over the world. The platform browser holds the actual site and is
- * only ever painted inside {@link BrowserScreen}. Neither is navigated to open or close anything:
- * opening the platform shows a browser that is already there, closing it merely stops rendering
- * it. A texture that only ever contains its own surface's frames cannot show the wrong page, so
- * there is no overlay flag, no acknowledgement protocol and no paint hold anywhere.
+ * <p>The page always hosts everything at once: the in-world layer (toasts, glitch effects) lives
+ * outside the router, and the platform UI sits inside a wrapper the front-end collapses with
+ * {@code content-visibility: hidden} whenever the mod says the screen is closed. Opening and
+ * closing the platform is therefore a CSS flip, not a navigation: no intermediate frames exist
+ * for a race to show, toast state is shared by construction, and the wrapper lives OUTSIDE the
+ * routed tree, so no redirect or history move can ever put the platform back over the game.
+ *
+ * <p>The browser itself is never hidden, throttled or navigated by the mod. The worst case on
+ * close is the platform lingering in the texture for a frame or two - the picture the player was
+ * looking at a moment ago - which is why this design needs no acknowledgement protocol and no
+ * paint hold.
  */
 public class CybercoreClientClient implements ClientModInitializer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("cybercore-client");
 
     static final String ITEMS_PATH = "/items";
-    static final String NOTHING_PATH = "/nothing";
 
     private static KeyMapping browserKey;
 
-    /** Always in the world, always on the overlay page. Audible only while the screen is closed. */
-    static CybercoreBrowser overlayBrowser;
-
-    /** The platform. Lives hidden and throttled between opens, so reopening is instant. */
-    static CybercoreBrowser platformBrowser;
+    static CybercoreBrowser browser;
 
     /** True while the in-game browser screen is open. */
     private static boolean platformShown = false;
@@ -81,10 +80,8 @@ public class CybercoreClientClient implements ClientModInitializer {
         });
 
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-            closeBrowserQuietly(overlayBrowser);
-            closeBrowserQuietly(platformBrowser);
-            overlayBrowser = null;
-            platformBrowser = null;
+            closeBrowserQuietly(browser);
+            browser = null;
             BrowserTexture.release();
             // Ours to call with MCEF: left running, the jcef helpers outlive the game.
             McefBootstrap.shutdown();
@@ -92,7 +89,7 @@ public class CybercoreClientClient implements ClientModInitializer {
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             refreshDisplayScale(client);
-            syncBrowserFrameRates();
+            syncBrowserFrameRate();
             BrowserLoadGuard.tick();
             tickPageStateReassert();
 
@@ -108,8 +105,8 @@ public class CybercoreClientClient implements ClientModInitializer {
 
             // The invariant: the platform is shown for as long as its screen is. Screens can
             // disappear by routes that never reach removed() - dying, a kick, a server-opened
-            // container - and the platform browser would otherwise stay unthrottled and audible.
-            // Restating it every tick costs a boolean comparison.
+            // container - and the page would otherwise keep the platform visible in a texture
+            // that is now painted over the world. Restating it every tick costs a boolean check.
             if (!(client.screen instanceof BrowserScreen)) {
                 deactivatePlatform();
             }
@@ -129,13 +126,13 @@ public class CybercoreClientClient implements ClientModInitializer {
                 return;
             }
 
-            ensureBrowsers();
+            ensureBrowser();
             if (client.screen instanceof BrowserScreen) {
                 deactivatePlatform();
                 client.setScreen(null);
             } else {
                 activatePlatform();
-                client.setScreen(new BrowserScreen(platformBrowser));
+                client.setScreen(new BrowserScreen(browser));
             }
         });
     }
@@ -151,92 +148,57 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
     }
 
-    static boolean isOurBrowser(org.cef.browser.CefBrowser browser) {
-        return browser != null && (browser == overlayBrowser || browser == platformBrowser);
+    static boolean isOurBrowser(org.cef.browser.CefBrowser candidate) {
+        return candidate != null && candidate == browser;
     }
 
-    /**
-     * Brings the hidden platform browser back: unhide, full frame rate, and one forced repaint in
-     * case Chromium considers its last frame still current after WasHidden.
-     */
     private static void activatePlatform() {
         if (platformShown) {
             return;
         }
         platformShown = true;
-        // Frame rate first, so the unhide below already schedules frames at full rate instead of
-        // finishing one last interval of the hidden cap.
-        syncBrowserFrameRates();
-        setWindowVisibilityQuietly(platformBrowser, true);
         notifyPlatformOpen(true);
-        forceRepaint(platformBrowser);
     }
 
     /**
      * Idempotent: the screen's own teardown and every path that closes it land here.
      *
-     * <p>Nothing is navigated - the page keeps whatever route it was on, however long ago, so
-     * reopening always returns to the exact same place. The browser is merely hidden: WasHidden
-     * lets Chromium throttle itself and fires the page's own visibility events, and the frame
-     * rate drops to 1 as a belt-and-braces cap.
+     * <p>Nothing else happens - no navigation, no hiding, no throttling. The page keeps whatever
+     * route it was on (reopening returns to the exact same place), collapses the platform wrapper
+     * itself, and keeps painting the in-world layer.
      */
     static void deactivatePlatform() {
         if (!platformShown) {
             return;
         }
         platformShown = false;
-        if (platformBrowser == null) {
-            return;
-        }
         notifyPlatformOpen(false);
-        setWindowVisibilityQuietly(platformBrowser, false);
-        syncBrowserFrameRates();
-    }
-
-    private static void setWindowVisibilityQuietly(MCEFBrowser browser, boolean visible) {
-        if (browser == null) {
-            return;
-        }
-        // Maps to CEF's WasHidden for windowless browsers. Wrapped because the jcef fork's
-        // behavior here is the least battle-tested part of the plan; if it throws, the frame-rate
-        // throttle still carries most of the saving.
-        try {
-            browser.setWindowVisibility(visible);
-        } catch (Throwable t) {
-            LOGGER.debug("setWindowVisibility({}) failed; relying on the frame-rate throttle.",
-                    visible, t);
-        }
     }
 
     /**
-     * Tells both pages whether the platform screen is open. The platform instance reads it as
-     * "I am (in)visible" - flushing buffered toasts and refreshing stale data on open - and the
-     * overlay instance reads it as "stay quiet, the platform is playing the sounds now".
-     * WasHidden should also make Chromium fire the standard Page Visibility events on the
-     * platform page, but the front-end must not depend on that working in this OSR build; this
-     * bridge is the signal it can trust.
+     * Tells the page whether the platform screen is open. The front-end collapses or reveals the
+     * platform wrapper off this flag, flushes stale data on open, and quiets the platform's own
+     * sounds while closed. Fire-and-forget: the flip is idempotent CSS, reasserted once a second,
+     * so a page that reloaded relearns it within a second and nothing needs to be acknowledged.
      */
     private static void notifyPlatformOpen(boolean open) {
-        String script = "(function(){if(typeof window.__ccSetPlatformOpen==='function')"
-                + "{window.__ccSetPlatformOpen(" + open + ");}})();";
-        if (overlayBrowser != null) {
-            overlayBrowser.executeJavaScript(script, overlayBrowser.getURL(), 0);
+        if (browser == null) {
+            return;
         }
-        if (platformBrowser != null) {
-            platformBrowser.executeJavaScript(script, platformBrowser.getURL(), 0);
-        }
+        browser.executeJavaScript(
+                "(function(){if(typeof window.__ccSetPlatformOpen==='function')"
+                        + "{window.__ccSetPlatformOpen(" + open + ");}})();",
+                browser.getURL(),
+                0
+        );
     }
 
     // ---- Once-a-second page state reassert --------------------------------------------------
     //
     // Two fire-and-forget signals, repeated so that a page that reloaded (service worker update,
-    // F5) relearns them within a second. No acknowledgements, nothing depends on the answers.
-    //
-    // The platform-open state is the live one. The overlay flag is legacy: front-end builds from
-    // before the two-browser split decide what to render off it, and the service worker can keep
-    // serving such a build for one more load; telling each browser its fixed role through the old
-    // channel keeps those builds working, while current builds define it as a no-op and go by
-    // their ccRole instead.
+    // F5) relearns them within a second. The platform-open flag is the live one; the overlay flag
+    // is legacy for front-end builds from before the platform-open bridge, which the service
+    // worker can keep serving for one more load - current builds map it onto the same flag.
 
     private static final int REASSERT_INTERVAL_TICKS = 20;
 
@@ -248,11 +210,10 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
         ticksSinceReassert = 0;
         notifyPlatformOpen(platformShown);
-        sendLegacyOverlayFlag(overlayBrowser, true);
-        sendLegacyOverlayFlag(platformBrowser, false);
+        sendLegacyOverlayFlag(!platformShown);
     }
 
-    private static void sendLegacyOverlayFlag(MCEFBrowser browser, boolean overlay) {
+    private static void sendLegacyOverlayFlag(boolean overlay) {
         if (browser == null) {
             return;
         }
@@ -276,38 +237,32 @@ public class CybercoreClientClient implements ClientModInitializer {
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
             BrowserLoadGuard.register();
-            ensureBrowsers();
+            ensureBrowser();
             LOGGER.info("MCEF initialized (accelerated paint: {}). Press B to open the browser.",
                     McefBootstrap.isAcceleratedPaint());
         });
     }
 
-    private static void ensureBrowsers() {
-        if (overlayBrowser == null) {
-            BrowserLoadGuard.reset();
-            overlayBrowser = createBrowser(NOTHING_PATH, "overlay");
-            lastAppliedZoom = 0;
-        }
-        if (platformBrowser == null) {
+    private static void ensureBrowser() {
+        if (browser == null) {
             platformShown = false;
-            platformBrowser = createBrowser(ITEMS_PATH, "platform");
+            BrowserLoadGuard.reset();
+            // Boot straight on the platform route: the page pre-renders the whole app inside the
+            // collapsed wrapper, so the very first open is as instant as every later one. What is
+            // painted over the world meanwhile is decided by the platform-open flag, not by the
+            // route - a fresh page defaults to "closed" until told otherwise.
+            browser = createBrowser(ITEMS_PATH);
             lastAppliedZoom = 0;
-            // Born hidden; it only becomes visible through activatePlatform().
-            setWindowVisibilityQuietly(platformBrowser, false);
         }
     }
 
     /** The URL a browser retries or falls back to - the load guard's target. */
-    static String bootUrl(MCEFBrowser browser) {
-        return pageUrl(browser == platformBrowser ? ITEMS_PATH : NOTHING_PATH, roleOf(browser));
+    static String bootUrl(MCEFBrowser ignored) {
+        return pageUrl(ITEMS_PATH);
     }
 
-    private static String roleOf(MCEFBrowser browser) {
-        return browser == platformBrowser ? "platform" : "overlay";
-    }
-
-    private static String pageUrl(String path, String role) {
-        return withClientParams(CybercoreConfig.getBaseUrl() + path, role);
+    private static String pageUrl(String path) {
+        return withClientParams(CybercoreConfig.getBaseUrl() + path);
     }
 
     static void reloadWithNewBaseUrl() {
@@ -317,13 +272,11 @@ public class CybercoreClientClient implements ClientModInitializer {
             client.setScreen(null);
         }
         deactivatePlatform();
-        closeBrowserQuietly(overlayBrowser);
-        closeBrowserQuietly(platformBrowser);
-        overlayBrowser = null;
-        platformBrowser = null;
+        closeBrowserQuietly(browser);
+        browser = null;
         BrowserTexture.release();
         BrowserTextInputTracker.reset();
-        ensureBrowsers();
+        ensureBrowser();
     }
 
     /** A shared-texture frame never touches the CPU, so it may track the monitor. */
@@ -332,17 +285,7 @@ public class CybercoreClientClient implements ClientModInitializer {
     /** Every software frame is copied out of CEF and re-uploaded, so it stays cheap. */
     private static final int MAX_SOFTWARE_BROWSER_FPS = 60;
 
-    /**
-     * Cap for the hidden platform browser. Not 1: CEF schedules OSR frames on a timer, so even an
-     * explicit invalidate on wake can sit out the rest of the current interval - at 1 fps that
-     * showed up as a full second of frozen animations after opening the screen. 10 keeps the wake
-     * latency imperceptible, and costs nothing while hidden because frames are damage-driven and
-     * WasHidden already throttles the page's own animation clocks.
-     */
-    private static final int HIDDEN_BROWSER_FPS = 10;
-
-    private static int lastAppliedOverlayFrameRate;
-    private static int lastAppliedPlatformFrameRate;
+    private static int lastAppliedFrameRate;
 
     private static int maxFrameRate() {
         int ceiling = McefBootstrap.isAcceleratedPaint()
@@ -356,17 +299,15 @@ public class CybercoreClientClient implements ClientModInitializer {
         return Math.min(ceiling, CybercoreConfig.getBrowserMaxFps());
     }
 
-    /** Reapplies only on change - a monitor switch, or the platform being shown or hidden. */
-    private static void syncBrowserFrameRates() {
-        int target = maxFrameRate();
-        if (overlayBrowser != null && target != lastAppliedOverlayFrameRate) {
-            overlayBrowser.setWindowlessFrameRate(target);
-            lastAppliedOverlayFrameRate = target;
+    /** Reapplies only when the window lands on a monitor with a different refresh rate. */
+    private static void syncBrowserFrameRate() {
+        if (browser == null) {
+            return;
         }
-        int platformTarget = platformShown ? target : HIDDEN_BROWSER_FPS;
-        if (platformBrowser != null && platformTarget != lastAppliedPlatformFrameRate) {
-            platformBrowser.setWindowlessFrameRate(platformTarget);
-            lastAppliedPlatformFrameRate = platformTarget;
+        int target = maxFrameRate();
+        if (target != lastAppliedFrameRate) {
+            browser.setWindowlessFrameRate(target);
+            lastAppliedFrameRate = target;
         }
     }
 
@@ -397,54 +338,13 @@ public class CybercoreClientClient implements ClientModInitializer {
 
         // The accelerated path runs at scale 1 (see CybercoreBrowser) and falls back on zoom for
         // OS display scaling - the pre-HiDPI behavior, kept because it is the one that works there.
-        if (McefBootstrap.isAcceleratedPaint()) {
+        if (browser != null && McefBootstrap.isAcceleratedPaint()) {
             double zoom = Math.log(displayScale) / Math.log(1.2);
             if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
-                if (overlayBrowser != null) {
-                    overlayBrowser.setZoomLevel(zoom);
-                }
-                if (platformBrowser != null) {
-                    platformBrowser.setZoomLevel(zoom);
-                }
+                browser.setZoomLevel(zoom);
                 lastAppliedZoom = zoom;
             }
         }
-    }
-
-    /**
-     * {@code CefBrowser_N.invalidate()} asks CEF for a fresh full frame; it is protected, hence the
-     * reflection. Re-sending the size through {@code resize} is not a substitute - CEF answers
-     * WasResized by comparing the view rect, so a resize to the size it already has can produce no
-     * frame at all.
-     */
-    private static final java.lang.reflect.Method INVALIDATE = resolveInvalidate();
-
-    private static java.lang.reflect.Method resolveInvalidate() {
-        try {
-            java.lang.reflect.Method method =
-                    Class.forName("org.cef.browser.CefBrowser_N").getDeclaredMethod("invalidate");
-            method.setAccessible(true);
-            return method;
-        } catch (Throwable t) {
-            LOGGER.warn("CefBrowser_N.invalidate() is not reachable; falling back to resize.", t);
-            return null;
-        }
-    }
-
-    private static void forceRepaint(MCEFBrowser browser) {
-        if (browser == null) {
-            return;
-        }
-        if (INVALIDATE != null) {
-            try {
-                INVALIDATE.invoke(browser);
-                return;
-            } catch (Throwable t) {
-                LOGGER.warn("invalidate() failed, falling back to resize.", t);
-            }
-        }
-        var window = Minecraft.getInstance().getWindow();
-        browser.resize(Math.max(1, window.getWidth()), Math.max(1, window.getHeight()));
     }
 
     private static final String CLEAR_CACHE_AND_RELOAD_JS =
@@ -456,32 +356,25 @@ public class CybercoreClientClient implements ClientModInitializer {
             + "location.reload();})();";
 
     /**
-     * Ordinary reload of the platform page. The service worker updates itself and re-fetches only
-     * the chunks whose hash changed, so this is what a page refresh should cost.
+     * Ordinary reload. The service worker updates itself and re-fetches only the chunks whose hash
+     * changed, so this is what a page refresh should cost.
      */
     static void reloadBrowser() {
-        if (platformBrowser == null) {
+        if (browser == null) {
             return;
         }
-        if (BrowserLoadGuard.isParked(platformBrowser)) {
-            BrowserLoadGuard.loadNow(platformBrowser, bootUrl(platformBrowser));
+        if (BrowserLoadGuard.isParked(browser)) {
+            BrowserLoadGuard.loadNow(browser, bootUrl(browser));
             return;
         }
-        platformBrowser.reload();
+        browser.reload();
     }
 
     /**
-     * Throws the whole browser-side cache away and reloads both pages from scratch, service worker
-     * included - the escape hatch for when a bad build got itself cached, not something to do
-     * routinely. The cache is one profile shared by both browsers, so both must reload to pick the
-     * fresh build up.
+     * Throws the whole browser-side cache away and reloads from scratch, service worker included -
+     * the escape hatch for when a bad build got itself cached, not something to do routinely.
      */
     static void hardReloadBrowser() {
-        hardReload(platformBrowser);
-        hardReload(overlayBrowser);
-    }
-
-    private static void hardReload(MCEFBrowser browser) {
         if (browser == null) {
             return;
         }
@@ -492,35 +385,26 @@ public class CybercoreClientClient implements ClientModInitializer {
         browser.executeJavaScript(CLEAR_CACHE_AND_RELOAD_JS, browser.getURL(), 0);
     }
 
-    private static CybercoreBrowser createBrowser(String path, String role) {
+    private static CybercoreBrowser createBrowser(String path) {
         // Built by hand instead of MCEF.createBrowser, which hardwires the base class: ours is the
         // same browser plus HiDPI and richer wheel input. shared_texture is only requested when
         // the platform probe accepted it - CEF ignores an unsupported request silently.
         int frameRate = maxFrameRate();
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
-                pageUrl(path, role),
+                pageUrl(path),
                 true,
                 new MCEFBrowserSettings(frameRate, McefBootstrap.isAcceleratedPaint())
         );
         b.setCloseAllowed();
         b.createImmediately();
-        if ("overlay".equals(role)) {
-            lastAppliedOverlayFrameRate = frameRate;
-        } else {
-            lastAppliedPlatformFrameRate = frameRate;
-        }
+        lastAppliedFrameRate = frameRate;
         return b;
     }
 
-    /**
-     * Marks the page as ours and, since the split, tells it which of the two browsers it lives in.
-     * The role is read once by the front-end and persisted per browsing session, so in-app
-     * navigation (which drops query parameters) cannot lose it.
-     */
-    private static String withClientParams(String url, String role) {
+    private static String withClientParams(String url) {
         String separator = url.contains("?") ? "&" : "?";
-        return url + separator + "isMCEFcliendMod=true&ccRole=" + role;
+        return url + separator + "isMCEFcliendMod=true";
     }
 
 }

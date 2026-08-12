@@ -32,7 +32,7 @@ final class BrowserEscapeBridge {
             @Override
             public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level,
                                             String message, String source, int line) {
-                if (browser != CybercoreClientClient.platformBrowser
+                if (!CybercoreClientClient.isOurBrowser(browser)
                         || !CLOSE_MESSAGE.equals(message)) {
                     return false;
                 }

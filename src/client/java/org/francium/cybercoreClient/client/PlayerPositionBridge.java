@@ -46,8 +46,7 @@ public final class PlayerPositionBridge {
             return;
         }
 
-        if (CybercoreClientClient.overlayBrowser == null
-                && CybercoreClientClient.platformBrowser == null) {
+        if (CybercoreClientClient.browser == null) {
             return;
         }
 
@@ -55,18 +54,14 @@ public final class PlayerPositionBridge {
         lastZ = roundedZ;
         lastYaw = roundedYaw;
 
-        sendToBoth("if(window.__ccPlayerPosition)window.__ccPlayerPosition("
+        send("if(window.__ccPlayerPosition)window.__ccPlayerPosition("
                 + roundedX + "," + roundedZ + "," + roundedYaw + ");");
     }
 
-    private static void sendToBoth(String script) {
-        MCEFBrowser overlay = CybercoreClientClient.overlayBrowser;
-        MCEFBrowser platform = CybercoreClientClient.platformBrowser;
-        if (overlay != null) {
-            overlay.executeJavaScript(script, overlay.getURL(), 0);
-        }
-        if (platform != null) {
-            platform.executeJavaScript(script, platform.getURL(), 0);
+    private static void send(String script) {
+        MCEFBrowser browser = CybercoreClientClient.browser;
+        if (browser != null) {
+            browser.executeJavaScript(script, browser.getURL(), 0);
         }
     }
 
@@ -75,7 +70,7 @@ public final class PlayerPositionBridge {
         lastZ = Double.NaN;
         lastYaw = Float.NaN;
 
-        sendToBoth("if(window.__ccPlayerPositionClear)window.__ccPlayerPositionClear();");
+        send("if(window.__ccPlayerPositionClear)window.__ccPlayerPositionClear();");
     }
 
     private static double round(double value, double scale) {

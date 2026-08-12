@@ -9,9 +9,10 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 
 /**
- * Draws the overlay browser over the world whenever no screen is open. That browser never holds
- * anything but the transparent in-world page, so there is nothing to gate on: the wrong-page
- * frame this element used to defend against cannot exist in its texture.
+ * Draws the browser over the world whenever no screen is open. The page keeps its platform UI
+ * collapsed via {@code content-visibility: hidden} for as long as the mod reports the screen
+ * closed, so what this paints is the transparent in-world layer - and the collapse is a CSS flip
+ * with no intermediate frames, so there is nothing to gate on.
  */
 public class BrowserOverlay implements HudElement {
 
@@ -24,7 +25,7 @@ public class BrowserOverlay implements HudElement {
         if (!McefBootstrap.isReady()) {
             return;
         }
-        MCEFBrowser browser = CybercoreClientClient.overlayBrowser;
+        MCEFBrowser browser = CybercoreClientClient.browser;
         if (browser == null) {
             return;
         }
