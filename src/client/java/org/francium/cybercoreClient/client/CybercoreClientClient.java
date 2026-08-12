@@ -279,24 +279,24 @@ public class CybercoreClientClient implements ClientModInitializer {
         ensureBrowser();
     }
 
-    /** A shared-texture frame never touches the CPU, so it may track the monitor. */
-    private static final int MAX_ACCELERATED_BROWSER_FPS = 240;
+    /** CEF's own ceiling for the windowless frame rate. */
+    private static final int MAX_BROWSER_FPS = 240;
 
-    /** Every software frame is copied out of CEF and re-uploaded, so it stays cheap. */
-    private static final int MAX_SOFTWARE_BROWSER_FPS = 60;
+    /** Used until GLFW reports a real refresh rate for the current monitor. */
+    private static final int FALLBACK_BROWSER_FPS = 60;
 
     private static int lastAppliedFrameRate;
 
+    /**
+     * Always the monitor's own refresh rate - no software cap and no config knob. Frames above it
+     * can never be seen, frames below it are visible judder.
+     */
     private static int maxFrameRate() {
-        int ceiling = McefBootstrap.isAcceleratedPaint()
-                ? MAX_ACCELERATED_BROWSER_FPS
-                : MAX_SOFTWARE_BROWSER_FPS;
-        // Frames above the monitor's refresh rate can never be seen.
         int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
-        if (refreshRate > 0) {
-            ceiling = Math.min(ceiling, refreshRate);
+        if (refreshRate <= 0) {
+            return FALLBACK_BROWSER_FPS;
         }
-        return Math.min(ceiling, CybercoreConfig.getBrowserMaxFps());
+        return Math.min(refreshRate, MAX_BROWSER_FPS);
     }
 
     /** Reapplies only when the window lands on a monitor with a different refresh rate. */

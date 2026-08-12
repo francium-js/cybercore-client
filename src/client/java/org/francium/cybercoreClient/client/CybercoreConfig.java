@@ -19,12 +19,8 @@ public final class CybercoreConfig {
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("cybercore-client.properties");
     private static final String KEY_BASE_URL = "baseUrl";
     private static final String KEY_SWAP_RED_BLUE = "swapRedBlue";
-    private static final String KEY_BROWSER_MAX_FPS = "browserMaxFps";
 
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
-
-    /** Effectively "no extra cap" - the platform ceilings in the client apply first. */
-    private static final int DEFAULT_BROWSER_MAX_FPS = 240;
 
     private static volatile String baseUrl = DEFAULT_BASE_URL;
 
@@ -37,9 +33,6 @@ public final class CybercoreConfig {
      * {@code swapRedBlue} property if the default is ever wrong for a given install.
      */
     private static volatile boolean swapRedBlue = DEFAULT_SWAP_RED_BLUE;
-
-    /** Upper bound for the browser's own frame rate; lower it to trade top rate for smoothness. */
-    private static volatile int browserMaxFps = DEFAULT_BROWSER_MAX_FPS;
 
     static {
         load();
@@ -60,10 +53,6 @@ public final class CybercoreConfig {
 
     static boolean isSwapRedBlue() {
         return swapRedBlue;
-    }
-
-    static int getBrowserMaxFps() {
-        return browserMaxFps;
     }
 
     private static void load() {
@@ -87,22 +76,12 @@ public final class CybercoreConfig {
         if (storedSwap != null && !storedSwap.isBlank()) {
             swapRedBlue = Boolean.parseBoolean(storedSwap.trim());
         }
-
-        String storedFps = props.getProperty(KEY_BROWSER_MAX_FPS);
-        if (storedFps != null && !storedFps.isBlank()) {
-            try {
-                browserMaxFps = Math.clamp(Integer.parseInt(storedFps.trim()), 30, 240);
-            } catch (NumberFormatException e) {
-                LOGGER.warn("browserMaxFps is not a number, keeping {}.", browserMaxFps);
-            }
-        }
     }
 
     private static void save() {
         Properties props = new Properties();
         props.setProperty(KEY_BASE_URL, baseUrl);
         props.setProperty(KEY_SWAP_RED_BLUE, String.valueOf(swapRedBlue));
-        props.setProperty(KEY_BROWSER_MAX_FPS, String.valueOf(browserMaxFps));
         try {
             Files.createDirectories(FILE.getParent());
             try (OutputStream out = Files.newOutputStream(FILE)) {
