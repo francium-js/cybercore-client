@@ -21,6 +21,12 @@ final class BrowserConsoleLog {
 
     private static final int MAX_MESSAGE_LENGTH = 300;
 
+    /** Chromium loves repeating one warning per frame; two copies tell the story. */
+    private static final int MAX_CONSECUTIVE_REPEATS = 2;
+
+    private static String lastMessage;
+    private static int consecutiveRepeats;
+
     private static boolean registered = false;
 
     private BrowserConsoleLog() {
@@ -43,6 +49,17 @@ final class BrowserConsoleLog {
                 String text = message.length() > MAX_MESSAGE_LENGTH
                         ? message.substring(0, MAX_MESSAGE_LENGTH) + "…"
                         : message;
+                if (text.equals(lastMessage)) {
+                    if (++consecutiveRepeats > MAX_CONSECUTIVE_REPEATS) {
+                        if (consecutiveRepeats == MAX_CONSECUTIVE_REPEATS + 1) {
+                            LOGGER.info("(the previous message keeps repeating - suppressing duplicates)");
+                        }
+                        return false;
+                    }
+                } else {
+                    lastMessage = text;
+                    consecutiveRepeats = 1;
+                }
                 if (level == CefSettings.LogSeverity.LOGSEVERITY_ERROR
                         || level == CefSettings.LogSeverity.LOGSEVERITY_FATAL) {
                     LOGGER.warn("{} ({}:{})", text, source, line);
