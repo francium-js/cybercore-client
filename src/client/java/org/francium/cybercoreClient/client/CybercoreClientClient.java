@@ -109,7 +109,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             syncBrowserFrameRate();
             BrowserLoadGuard.tick();
             tickPageStateReassert();
-            tickRecoverDroppedFrames();
+            tickPaintFreshness();
 
             // The invariant: the platform is shown for as long as its screen is. Screens can
             // disappear by routes that never reach removed() - dying, a kick, a server-opened
@@ -174,6 +174,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         platformShown = true;
+        LOGGER.info("Platform screen opened.");
         notifyPlatformOpen(true);
     }
 
@@ -190,6 +191,13 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
         platformShown = false;
         platformClosedAtNanos = System.nanoTime();
+        // Insurance for the accelerated path's frame filter: a few ticks from now - enough for
+        // the collapse flag to land and the CSS flip to apply - force one full-damage repaint,
+        // so the gate always gets a frame that cannot be silently discarded.
+        closeInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
+        gateBlockedTicks = 0;
+        gateWarned = false;
+        LOGGER.info("Platform screen closed.");
         notifyPlatformOpen(false);
     }
 
@@ -216,6 +224,55 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     private static volatile boolean droppedFrameWhileGateClosed;
 
+    /** ~150 ms: enough for the collapse flag to land and the CSS flip to repaint. */
+    private static final int CLOSE_INVALIDATE_DELAY_TICKS = 3;
+
+    private static int closeInvalidateTicks = 0;
+
+    private static final int GATE_WARN_TICKS = 100;
+
+    private static int gateBlockedTicks = 0;
+
+    private static boolean gateWarned = false;
+
+    /**
+     * The per-tick freshness watchdog. While the platform is closed and no accepted frame has
+     * arrived since, it (1) fires the one scheduled post-close full repaint, (2) converts
+     * delivered-but-discarded frames into another full repaint, and (3) shouts into the log if
+     * the gate has been closed for seconds - the renderer is then hung, and a report's
+     * latest.log should say so.
+     */
+    private static void tickPaintFreshness() {
+        if (platformShown || browser == null) {
+            return;
+        }
+        if (hasPaintedSinceClose()) {
+            gateBlockedTicks = 0;
+            closeInvalidateTicks = 0;
+            droppedFrameWhileGateClosed = false;
+            return;
+        }
+
+        if (closeInvalidateTicks > 0 && --closeInvalidateTicks == 0) {
+            LOGGER.info("No accepted browser frame since close - forcing a full repaint.");
+            browser.invalidateView();
+        }
+
+        if (droppedFrameWhileGateClosed) {
+            droppedFrameWhileGateClosed = false;
+            LOGGER.info("A browser frame was discarded by the accelerated filter while waiting "
+                    + "for the post-close repaint - forcing a full one.");
+            browser.invalidateView();
+        }
+
+        if (++gateBlockedTicks >= GATE_WARN_TICKS && !gateWarned) {
+            gateWarned = true;
+            LOGGER.warn("No browser frame accepted for {} ticks after closing the platform - "
+                    + "the page renderer looks hung or its frames keep being discarded.",
+                    gateBlockedTicks);
+        }
+    }
+
     /**
      * A frame arrived but MCEF's accelerated filter discarded it (see CybercoreBrowser). While
      * the freshness gate is closed that frame was the one meant to open it - and its arrival
@@ -228,16 +285,6 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
     }
 
-    /** One forced repaint per tick at most - the flag collapses however many drops occurred. */
-    private static void tickRecoverDroppedFrames() {
-        if (!droppedFrameWhileGateClosed) {
-            return;
-        }
-        droppedFrameWhileGateClosed = false;
-        if (browser != null && !hasPaintedSinceClose()) {
-            browser.invalidateView();
-        }
-    }
 
     /**
      * Tells the page whether the platform screen is open. The front-end collapses or reveals the
@@ -299,6 +346,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserTextInputTracker.register();
             BrowserEscapeBridge.register();
             BrowserScaleBridge.register();
+            BrowserConsoleLog.register();
             registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
