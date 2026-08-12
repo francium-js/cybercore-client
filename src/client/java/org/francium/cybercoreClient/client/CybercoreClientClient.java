@@ -174,6 +174,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         platformShown = true;
+        toggleInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
         LOGGER.info("Platform screen opened.");
         notifyPlatformOpen(true);
     }
@@ -193,8 +194,8 @@ public class CybercoreClientClient implements ClientModInitializer {
         platformClosedAtNanos = System.nanoTime();
         // Insurance for the accelerated path's frame filter: a few ticks from now - enough for
         // the collapse flag to land and the CSS flip to apply - force one full-damage repaint,
-        // so the gate always gets a frame that cannot be silently discarded.
-        closeInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
+        // so the texture always ends up showing the post-toggle state.
+        toggleInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
         gateBlockedTicks = 0;
         gateWarned = false;
         LOGGER.info("Platform screen closed.");
@@ -215,6 +216,9 @@ public class CybercoreClientClient implements ClientModInitializer {
     /** Called from CEF's paint threads (see CybercoreBrowser). */
     static void notePaint() {
         lastPaintNanos = System.nanoTime();
+        // An accepted frame means the texture now shows the page's current state - whatever
+        // recovery a dropped frame had armed is no longer needed.
+        droppedFrameRecoveryArmed = false;
     }
 
     /** Whether the texture holds a frame painted after the platform screen last closed. */
@@ -222,12 +226,12 @@ public class CybercoreClientClient implements ClientModInitializer {
         return lastPaintNanos - platformClosedAtNanos > 0;
     }
 
-    private static volatile boolean droppedFrameWhileGateClosed;
+    private static volatile boolean droppedFrameRecoveryArmed;
 
     /** ~150 ms: enough for the collapse flag to land and the CSS flip to repaint. */
     private static final int CLOSE_INVALIDATE_DELAY_TICKS = 3;
 
-    private static int closeInvalidateTicks = 0;
+    private static int toggleInvalidateTicks = 0;
 
     private static final int GATE_WARN_TICKS = 100;
 
@@ -236,53 +240,57 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static boolean gateWarned = false;
 
     /**
-     * The per-tick freshness watchdog. While the platform is closed and no accepted frame has
-     * arrived since, it (1) fires the one scheduled post-close full repaint, (2) converts
-     * delivered-but-discarded frames into another full repaint, and (3) shouts into the log if
-     * the gate has been closed for seconds - the renderer is then hung, and a report's
-     * latest.log should say so.
+     * The per-tick freshness watchdog.
+     *
+     * <p>It fires one unconditional full repaint shortly after every open/close: the freshness
+     * clock can be satisfied honestly by a frame that still shows the pre-toggle picture (frames
+     * flow continuously), while the frame carrying the new state is exactly the one the
+     * accelerated filter or the shared-texture import can eat - the Windows logs showed complete
+     * applied-flag chains with the old picture stuck on screen. One forced full-damage frame per
+     * toggle refreshes the texture through every filter, the same insurance LiquidBounce takes
+     * on every screen change.
+     *
+     * <p>It also converts any dropped frame into a repaint (armed until the next accepted frame
+     * disarms it), and shouts into the log when nothing has been accepted for seconds after a
+     * close - the renderer is then hung, and a report's latest.log should say so.
      */
     private static void tickPaintFreshness() {
-        if (platformShown || browser == null) {
+        if (browser == null) {
             return;
         }
-        if (hasPaintedSinceClose()) {
+
+        if (toggleInvalidateTicks > 0 && --toggleInvalidateTicks == 0) {
+            browser.invalidateView();
+        }
+
+        if (droppedFrameRecoveryArmed) {
+            droppedFrameRecoveryArmed = false;
+            LOGGER.info("A browser frame was discarded by the accelerated filter - forcing a "
+                    + "full repaint.");
+            browser.invalidateView();
+        }
+
+        if (platformShown || hasPaintedSinceClose()) {
             gateBlockedTicks = 0;
-            closeInvalidateTicks = 0;
-            droppedFrameWhileGateClosed = false;
+            gateWarned = false;
             return;
         }
-
-        if (closeInvalidateTicks > 0 && --closeInvalidateTicks == 0) {
-            LOGGER.info("No accepted browser frame since close - forcing a full repaint.");
-            browser.invalidateView();
-        }
-
-        if (droppedFrameWhileGateClosed) {
-            droppedFrameWhileGateClosed = false;
-            LOGGER.info("A browser frame was discarded by the accelerated filter while waiting "
-                    + "for the post-close repaint - forcing a full one.");
-            browser.invalidateView();
-        }
-
         if (++gateBlockedTicks >= GATE_WARN_TICKS && !gateWarned) {
             gateWarned = true;
             LOGGER.warn("No browser frame accepted for {} ticks after closing the platform - "
-                    + "the page renderer looks hung or its frames keep being discarded.",
-                    gateBlockedTicks);
+                    + "the page renderer looks hung.", gateBlockedTicks);
         }
     }
 
     /**
-     * A frame arrived but MCEF's accelerated filter discarded it (see CybercoreBrowser). While
-     * the freshness gate is closed that frame was the one meant to open it - and its arrival
-     * proves the renderer is alive, so forcing a full-damage repaint is safe: a hung page sends
-     * no frames at all and never gets here.
+     * A frame arrived but MCEF's accelerated filter discarded it (see CybercoreBrowser). The
+     * texture is stale from this moment on - whatever that frame carried is lost - so a
+     * full-damage repaint is forced on the next tick unless an accepted frame lands first
+     * (notePaint disarms). The frame's arrival proves the renderer is alive, so forcing is
+     * safe: a hung page sends no frames at all and never gets here.
      */
     static void noteDroppedFrame() {
-        if (!hasPaintedSinceClose()) {
-            droppedFrameWhileGateClosed = true;
-        }
+        droppedFrameRecoveryArmed = true;
     }
 
 
