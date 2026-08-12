@@ -109,6 +109,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             syncBrowserFrameRate();
             BrowserLoadGuard.tick();
             tickPageStateReassert();
+            tickRecoverDroppedFrames();
 
             // The invariant: the platform is shown for as long as its screen is. Screens can
             // disappear by routes that never reach removed() - dying, a kick, a server-opened
@@ -211,6 +212,31 @@ public class CybercoreClientClient implements ClientModInitializer {
     /** Whether the texture holds a frame painted after the platform screen last closed. */
     static boolean hasPaintedSinceClose() {
         return lastPaintNanos - platformClosedAtNanos > 0;
+    }
+
+    private static volatile boolean droppedFrameWhileGateClosed;
+
+    /**
+     * A frame arrived but MCEF's accelerated filter discarded it (see CybercoreBrowser). While
+     * the freshness gate is closed that frame was the one meant to open it - and its arrival
+     * proves the renderer is alive, so forcing a full-damage repaint is safe: a hung page sends
+     * no frames at all and never gets here.
+     */
+    static void noteDroppedFrame() {
+        if (!hasPaintedSinceClose()) {
+            droppedFrameWhileGateClosed = true;
+        }
+    }
+
+    /** One forced repaint per tick at most - the flag collapses however many drops occurred. */
+    private static void tickRecoverDroppedFrames() {
+        if (!droppedFrameWhileGateClosed) {
+            return;
+        }
+        droppedFrameWhileGateClosed = false;
+        if (browser != null && !hasPaintedSinceClose()) {
+            browser.invalidateView();
+        }
     }
 
     /**

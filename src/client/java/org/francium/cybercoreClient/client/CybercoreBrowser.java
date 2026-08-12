@@ -109,24 +109,69 @@ final class CybercoreBrowser extends MCEFBrowser {
 
     // ---- Paint freshness ---------------------------------------------------------------------
     //
-    // Every frame Chromium delivers, software or accelerated, stamps a clock the mod reads to
-    // decide whether the texture may be drawn over the world (see BrowserOverlay): after the
-    // platform closes, the picture in the texture is the platform itself until the page paints
-    // its collapsed state - and if the renderer hung or died, that frame never comes and the
-    // platform would stay frozen over the game forever.
+    // Frames that actually update the texture stamp a clock the mod reads to decide whether the
+    // texture may be drawn over the world (see BrowserOverlay): after the platform closes, the
+    // picture in the texture is the platform itself until the page paints its collapsed state -
+    // and if the renderer hung or died, that frame never comes and the platform would stay
+    // frozen over the game forever.
+    //
+    // "Actually update" is the hard part on the accelerated path: MCEF silently discards frames
+    // (degenerate rects, and after a size change everything until full damage arrives), and a
+    // clock stamped on a discarded frame would open the gate on a texture still holding the old
+    // picture - the platform, frozen over the world. So the acceptance test below mirrors
+    // MCEF 3.3.0's own filter, and a delivered-but-discarded frame is reported instead: the
+    // renderer is demonstrably alive, so the mod may safely force a full-damage repaint.
 
     @Override
     public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
                         ByteBuffer buffer, int width, int height) {
         super.onPaint(browser, popup, dirtyRects, buffer, width, height);
-        CybercoreClientClient.notePaint();
+        // Texture id zero means MCEF returned before rendering (first frame races the texture).
+        if (!popup && dirtyRects.length > 0 && getRenderer().getTextureId() != 0) {
+            CybercoreClientClient.notePaint();
+        }
     }
 
     @Override
     public void onAcceleratedPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
                                    CefAcceleratedPaintInfo info) {
+        boolean reachesTexture = !popup && acceleratedFrameReachesTexture(dirtyRects, info);
         super.onAcceleratedPaint(browser, popup, dirtyRects, info);
-        CybercoreClientClient.notePaint();
+        if (reachesTexture) {
+            CybercoreClientClient.notePaint();
+        } else if (!popup) {
+            CybercoreClientClient.noteDroppedFrame();
+        }
+    }
+
+    private int lastAcceptedFrameWidth;
+    private int lastAcceptedFrameHeight;
+
+    /** MCEF 3.3.0's accelerated frame filter, replicated bit for bit (verified in bytecode). */
+    private boolean acceleratedFrameReachesTexture(Rectangle[] dirtyRects, CefAcceleratedPaintInfo info) {
+        if (dirtyRects.length == 0) {
+            return false;
+        }
+        if (info.width <= 1 || info.height <= 1
+                || dirtyRects[0].width <= 1 || dirtyRects[0].height <= 1) {
+            return false;
+        }
+        if (info.width != lastAcceptedFrameWidth || info.height != lastAcceptedFrameHeight) {
+            Rectangle first = dirtyRects[0];
+            boolean fullDamage = first.x == 0 && first.y == 0
+                    && first.width == info.width && first.height == info.height;
+            if (!fullDamage) {
+                return false;
+            }
+            lastAcceptedFrameWidth = info.width;
+            lastAcceptedFrameHeight = info.height;
+        }
+        return true;
+    }
+
+    /** jcef keeps CEF's Invalidate protected; the mod needs it to force a full-damage repaint. */
+    void invalidateView() {
+        invalidate();
     }
 
     @Override
