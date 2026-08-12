@@ -32,7 +32,7 @@ final class BrowserAccelBridge {
             @Override
             public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level,
                                             String message, String source, int line) {
-                if (!CybercoreClientClient.isOurBrowser(browser)
+                if (!CybercoreClientClient.isUiBrowser(browser)
                         || message == null || !message.startsWith(MESSAGE_PREFIX)) {
                     return false;
                 }

@@ -7,14 +7,15 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 
 /**
- * Draws the transparent in-world layer (toasts, glitch effects) on top of whatever the game is
- * currently showing: the HUD, chat, any menu, the title screen, world-loading screens and the
- * resource-pack overlay alike. Hooked from the tail of {@code GameRenderer.extractGui} (see
- * GameRendererMixin), after everything vanilla has been extracted, in a stratum of its own - a
- * notification is never hidden behind the thing the player happens to be looking at.
+ * Draws the overlay browser - the notification layer - on top of whatever the game is currently
+ * showing: the HUD, chat, any menu, the title screen, loading screens, and the platform screen
+ * itself. Hooked from the tail of {@code GameRenderer.extractGui} (see GameRendererMixin), after
+ * everything vanilla has been extracted, in a stratum of its own: a notification is never hidden
+ * behind the thing the player happens to be looking at.
  *
- * <p>The one exception is {@link BrowserScreen}: there the browser texture IS the screen, and
- * painting it a second time would double every toast.
+ * <p>This browser hosts nothing but the floating layer, so there is no gate to keep: whatever
+ * its texture holds is toast pixels over transparency, and the worst a stale frame can show is
+ * an outdated toast.
  */
 public final class BrowserOverlay {
 
@@ -29,17 +30,12 @@ public final class BrowserOverlay {
         if (!McefBootstrap.isReady()) {
             return;
         }
-        MCEFBrowser browser = CybercoreClientClient.browser;
+        MCEFBrowser browser = CybercoreClientClient.overlayBrowser;
         if (browser == null) {
             return;
         }
-        Minecraft mc = Minecraft.getInstance();
 
-        if (mc.screen instanceof BrowserScreen) {
-            return;
-        }
-
-        Window window = mc.getWindow();
+        Window window = Minecraft.getInstance().getWindow();
 
         int fbWidth = Math.max(1, window.getWidth());
         int fbHeight = Math.max(1, window.getHeight());
@@ -50,14 +46,6 @@ public final class BrowserOverlay {
             lastBrowser = browser;
             lastWidth = fbWidth;
             lastHeight = fbHeight;
-        }
-
-        // Until a frame painted AFTER the page confirmed the collapse lands in the texture, it
-        // may still show the platform itself - a frame that is merely newer than the close can
-        // honestly carry the old picture. Whatever fails upstream (hung renderer, lost shared
-        // frame), the failure mode is a clean world, never a frozen platform.
-        if (!CybercoreClientClient.mayDrawOverlay()) {
-            return;
         }
 
         Identifier texture = BrowserTexture.resolve(browser);

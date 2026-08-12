@@ -46,9 +46,10 @@ final class BrowserConsoleLog {
                         || message == null || message.startsWith(INPUT_CHANNEL_PREFIX)) {
                     return false;
                 }
-                String text = message.length() > MAX_MESSAGE_LENGTH
+                String role = CybercoreClientClient.isOverlayBrowser(browser) ? "[ov] " : "[ui] ";
+                String text = role + (message.length() > MAX_MESSAGE_LENGTH
                         ? message.substring(0, MAX_MESSAGE_LENGTH) + "…"
-                        : message;
+                        : message);
                 if (text.equals(lastMessage)) {
                     if (++consecutiveRepeats > MAX_CONSECUTIVE_REPEATS) {
                         if (consecutiveRepeats == MAX_CONSECUTIVE_REPEATS + 1) {

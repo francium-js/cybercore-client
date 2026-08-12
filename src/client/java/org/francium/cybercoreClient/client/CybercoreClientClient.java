@@ -10,6 +10,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
@@ -21,19 +22,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * One browser, one app instance, and a single boolean between the two worlds.
+ * Two browsers, one page each, and no shared texture between the two worlds.
  *
- * <p>The page always hosts everything at once: the in-world layer (toasts, glitch effects) lives
- * outside the router, and the platform UI sits inside a wrapper the front-end collapses with
- * {@code content-visibility: hidden} whenever the mod says the screen is closed. Opening and
- * closing the platform is therefore a CSS flip, not a navigation: no intermediate frames exist
- * for a race to show, toast state is shared by construction, and the wrapper lives OUTSIDE the
- * routed tree, so no redirect or history move can ever put the platform back over the game.
+ * <p>The overlay browser hosts nothing but the floating in-world layer (toasts, glitch effects)
+ * and is painted on top of everything the game shows, always - it never navigates, never
+ * collapses, never carries the platform. The UI browser hosts the whole platform, permanently
+ * expanded, and is painted exclusively while {@link BrowserScreen} is open. "The platform stuck
+ * over the world" is thereby impossible by construction: the platform's texture is simply never
+ * drawn outside its screen, however the frames flow.
  *
- * <p>The browser itself is never hidden, throttled or navigated by the mod. The worst case on
- * close is the platform lingering in the texture for a frame or two - the picture the player was
- * looking at a moment ago - which is why this design needs no acknowledgement protocol and no
- * paint hold.
+ * <p>Clicks over a toast are routed to the overlay browser (the front-end reports live toast
+ * rectangles - see BrowserToastRectsBridge), everything else goes to the UI browser.
  */
 public class CybercoreClientClient implements ClientModInitializer {
 
@@ -41,9 +40,16 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     static final String ITEMS_PATH = "/items";
 
+    /** The overlay page parks its router here; the layer it paints lives outside the router. */
+    static final String NOTHING_PATH = "/nothing";
+
     private static KeyMapping browserKey;
 
-    static CybercoreBrowser browser;
+    /** The platform. Painted only while BrowserScreen is open. */
+    static CybercoreBrowser uiBrowser;
+
+    /** The notification layer. Painted over everything, always. */
+    static CybercoreBrowser overlayBrowser;
 
     /** True while the in-game browser screen is open. */
     private static boolean platformShown = false;
@@ -62,24 +68,43 @@ public class CybercoreClientClient implements ClientModInitializer {
                 )
         );
 
-        // The notification layer is NOT a HUD element: it hooks the tail of GameRenderer's GUI
-        // extraction (see GameRendererMixin), so toasts stay visible over chat, menus, the title
-        // screen and loading screens too - the HUD renders only in-world with no screen open.
+        // The overlay browser is drawn from the tail of GameRenderer's GUI extraction (see
+        // GameRendererMixin), so toasts stay visible over the HUD, chat, menus, the title screen
+        // and loading screens alike - and over the platform screen itself.
 
-        // The main menu is the other place the platform may open from. Key mappings never fire
-        // while a screen is up (the screen owns the keyboard), so the title screen gets its own
-        // key hook; every other screen keeps its keys - in chat, B is just a letter.
         ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
-            if (!(screen instanceof TitleScreen)) {
-                return;
+            // The main menu is the other place the platform may open from. Key mappings never
+            // fire while a screen is up (the screen owns the keyboard), so the title screen gets
+            // its own key hook; in chat, B stays a letter.
+            if (screen instanceof TitleScreen) {
+                ScreenKeyboardEvents.allowKeyPress(screen).register((s, event) -> {
+                    if (!matchesBrowserKey(event)) {
+                        return true;
+                    }
+                    toggleBrowserScreen(client);
+                    return false;
+                });
             }
-            ScreenKeyboardEvents.allowKeyPress(screen).register((s, event) -> {
-                if (!matchesBrowserKey(event)) {
-                    return true;
-                }
-                toggleBrowserScreen(client);
-                return false;
-            });
+
+            // Toasts hang over every screen, so a click on one must reach the overlay browser
+            // instead of the screen under it - chat, inventory, menus. BrowserScreen routes its
+            // own input (hover included) and is left alone here.
+            if (!(screen instanceof BrowserScreen)) {
+                ScreenMouseEvents.allowMouseClick(screen).register((s, event) -> {
+                    if (!isToastAtGui(event.x(), event.y()) || overlayBrowser == null) {
+                        return true;
+                    }
+                    overlayBrowser.sendMousePress(toFbX(event.x()), toFbY(event.y()), event.button());
+                    return false;
+                });
+                ScreenMouseEvents.allowMouseRelease(screen).register((s, event) -> {
+                    if (!isToastAtGui(event.x(), event.y()) || overlayBrowser == null) {
+                        return true;
+                    }
+                    overlayBrowser.sendMouseRelease(toFbX(event.x()), toFbY(event.y()), event.button());
+                    return false;
+                });
+            }
         });
 
         CybercoreServer.register();
@@ -97,8 +122,10 @@ public class CybercoreClientClient implements ClientModInitializer {
         });
 
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
-            closeBrowserQuietly(browser);
-            browser = null;
+            closeBrowserQuietly(uiBrowser);
+            closeBrowserQuietly(overlayBrowser);
+            uiBrowser = null;
+            overlayBrowser = null;
             BrowserTexture.release();
             // Ours to call with MCEF: left running, the jcef helpers outlive the game.
             McefBootstrap.shutdown();
@@ -109,13 +136,12 @@ public class CybercoreClientClient implements ClientModInitializer {
             syncBrowserFrameRate();
             BrowserLoadGuard.tick();
             tickPageStateReassert();
-            tickPaintFreshness();
 
             // The invariant: the platform is shown for as long as its screen is. Screens can
             // disappear by routes that never reach removed() - dying, a kick, a server-opened
-            // container, quitting to the menu - and the page would otherwise keep the platform
-            // visible in a texture that is now painted over the world. Restating it every tick
-            // costs a boolean check.
+            // container, quitting to the menu. The flag only drives the page's sounds and
+            // refetches now - visibility is the mod's own draw decision - but stale "open"
+            // would keep the platform's music playing under the game.
             if (!(client.screen instanceof BrowserScreen)) {
                 deactivatePlatform();
             }
@@ -142,7 +168,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
 
-        ensureBrowser();
+        ensureBrowsers();
         if (client.screen instanceof BrowserScreen) {
             deactivatePlatform();
             // Outside a world this reopens the title screen by itself - vanilla setScreen(null)
@@ -150,7 +176,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             client.setScreen(null);
         } else {
             activatePlatform();
-            client.setScreen(new BrowserScreen(browser));
+            client.setScreen(new BrowserScreen(uiBrowser));
         }
     }
 
@@ -166,7 +192,15 @@ public class CybercoreClientClient implements ClientModInitializer {
     }
 
     static boolean isOurBrowser(org.cef.browser.CefBrowser candidate) {
-        return candidate != null && candidate == browser;
+        return isUiBrowser(candidate) || isOverlayBrowser(candidate);
+    }
+
+    static boolean isUiBrowser(org.cef.browser.CefBrowser candidate) {
+        return candidate != null && candidate == uiBrowser;
+    }
+
+    static boolean isOverlayBrowser(org.cef.browser.CefBrowser candidate) {
+        return candidate != null && candidate == overlayBrowser;
     }
 
     private static void activatePlatform() {
@@ -174,188 +208,39 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         platformShown = true;
-        toggleInvalidateTicks = CLOSE_INVALIDATE_DELAY_TICKS;
         LOGGER.info("Platform screen opened.");
         notifyPlatformOpen(true);
     }
 
     /**
-     * Idempotent: the screen's own teardown and every path that closes it land here.
-     *
-     * <p>Nothing else happens - no navigation, no hiding, no throttling. The page keeps whatever
-     * route it was on (reopening returns to the exact same place), collapses the platform wrapper
-     * itself, and keeps painting the in-world layer.
+     * Idempotent: the screen's own teardown and every path that closes it land here. Purely a
+     * page-side affair now (sounds, refetches) - what is painted over the world is decided by
+     * the mod alone, and the UI browser's texture simply is not.
      */
     static void deactivatePlatform() {
         if (!platformShown) {
             return;
         }
         platformShown = false;
-        platformClosedAtNanos = System.nanoTime();
-        // Hard-close the gate: nothing goes over the world until the page confirms the collapse
-        // AND a frame painted after that confirmation lands. The repaint train in
-        // tickPaintFreshness does the rest.
-        collapseBarNanos = Long.MAX_VALUE;
-        gateBlockedTicks = 0;
-        gateWarned = false;
         LOGGER.info("Platform screen closed.");
         notifyPlatformOpen(false);
     }
 
-    // ---- Paint freshness ----------------------------------------------------------------------
-    //
-    // The moment the platform closes, the browser texture still holds the platform's last frame,
-    // and "a frame arrived after the close" is not proof of anything better: frames flow
-    // continuously, so the first one after the close can honestly carry the pre-collapse picture,
-    // while the frame with the collapsed state is exactly the one MCEF's shared-frame import can
-    // lose without a trace (importFrame returning null skips it silently). So the bar the clock
-    // must clear is not the close - it is the page's own confirmation that the collapse was
-    // applied (the "[cc-page] overlay applied" console trace): a frame painted after that moment
-    // cannot show the platform. Until such a frame lands, nothing is drawn over the world and
-    // full repaints are forced in a steady train - CEF cycles through a pool of shared textures,
-    // so a train beats an import failure that eats any single frame.
-
-    private static volatile long lastPaintNanos = Long.MIN_VALUE;
-
-    /** {@link Long#MAX_VALUE} while waiting for the page to confirm the collapse. */
-    private static volatile long collapseBarNanos = Long.MAX_VALUE;
-
-    private static volatile long platformClosedAtNanos = 0;
-
     /**
-     * The page confirmed the overlay state (relayed console trace, see BrowserCollapseAckBridge).
-     * Only the first confirmation after a close sets the bar - the later heartbeats re-state the
-     * same fact and must not push the bar forward past frames that were already valid.
-     */
-    static void noteOverlayApplied(boolean overlay) {
-        if (!overlay || platformShown) {
-            return;
-        }
-        if (collapseBarNanos == Long.MAX_VALUE) {
-            collapseBarNanos = System.nanoTime();
-        }
-    }
-
-    /** Whether the texture provably holds a frame painted after the page collapsed the platform. */
-    static boolean mayDrawOverlay() {
-        return lastPaintNanos - collapseBarNanos > 0;
-    }
-
-    /** Called from CEF's paint threads (see CybercoreBrowser). */
-    static void notePaint() {
-        lastPaintNanos = System.nanoTime();
-        // An accepted frame means the texture now shows the page's current state - whatever
-        // recovery a dropped frame had armed is no longer needed.
-        droppedFrameRecoveryArmed = false;
-    }
-
-    private static volatile boolean droppedFrameRecoveryArmed;
-
-    /** ~150 ms: enough for the expand flag to land and the CSS flip to repaint. */
-    private static final int CLOSE_INVALIDATE_DELAY_TICKS = 3;
-
-    private static int toggleInvalidateTicks = 0;
-
-    /** After ~3 s without confirmation, assume a front-end build without the applied trace. */
-    private static final int LEGACY_FALLBACK_TICKS = 60;
-
-    private static final int GATE_WARN_TICKS = 100;
-
-    private static int gateBlockedTicks = 0;
-
-    private static boolean gateWarned = false;
-
-    /**
-     * The per-tick freshness watchdog.
-     *
-     * <p>While the platform is closed and the gate is shut, it forces a full-damage repaint
-     * every other tick: a single forced frame can be eaten whole by MCEF's silent shared-frame
-     * import failure, but CEF rotates a pool of shared textures, so a steady train lands one.
-     * The moment a frame painted after the page's collapse confirmation arrives, the gate opens
-     * and the train stops - on a healthy machine that is the first or second frame.
-     *
-     * <p>It also converts any filter-dropped frame into a repaint (armed until the next accepted
-     * frame disarms it), falls back to the close-time bar for front-end builds that never send
-     * the confirmation, and shouts into the log when nothing lands for seconds - the renderer is
-     * then hung, and a report's latest.log should say so.
-     */
-    private static void tickPaintFreshness() {
-        if (browser == null) {
-            return;
-        }
-
-        if (toggleInvalidateTicks > 0 && --toggleInvalidateTicks == 0) {
-            browser.invalidateView();
-        }
-
-        if (droppedFrameRecoveryArmed) {
-            droppedFrameRecoveryArmed = false;
-            LOGGER.info("A browser frame was discarded by the accelerated filter - forcing a "
-                    + "full repaint.");
-            browser.invalidateView();
-        }
-
-        if (platformShown || mayDrawOverlay()) {
-            gateBlockedTicks = 0;
-            gateWarned = false;
-            return;
-        }
-
-        gateBlockedTicks++;
-
-        if (gateBlockedTicks % 2 == 0) {
-            browser.invalidateView();
-        }
-
-        if (gateBlockedTicks == LEGACY_FALLBACK_TICKS && collapseBarNanos == Long.MAX_VALUE) {
-            LOGGER.warn("The page never confirmed the collapse (front-end without the applied "
-                    + "trace?) - falling back to the close-time bar.");
-            collapseBarNanos = platformClosedAtNanos;
-        }
-
-        if (gateBlockedTicks >= GATE_WARN_TICKS && !gateWarned) {
-            gateWarned = true;
-            LOGGER.warn("No confirmed browser frame for {} ticks after closing the platform - "
-                    + "the page renderer looks hung.", gateBlockedTicks);
-        }
-    }
-
-    /**
-     * A frame arrived but MCEF's accelerated filter discarded it (see CybercoreBrowser). The
-     * texture is stale from this moment on - whatever that frame carried is lost - so a
-     * full-damage repaint is forced on the next tick unless an accepted frame lands first
-     * (notePaint disarms). The frame's arrival proves the renderer is alive, so forcing is
-     * safe: a hung page sends no frames at all and never gets here.
-     */
-    static void noteDroppedFrame() {
-        droppedFrameRecoveryArmed = true;
-    }
-
-
-    /**
-     * Tells the page whether the platform screen is open. The front-end collapses or reveals the
-     * platform wrapper off this flag, flushes stale data on open, and quiets the platform's own
-     * sounds while closed. Fire-and-forget: the flip is idempotent CSS, reasserted once a second,
-     * so a page that reloaded relearns it within a second and nothing needs to be acknowledged.
+     * Tells the platform page whether its screen is open - it gates the music loop and refreshes
+     * stale data on open. Fire-and-forget, reasserted once a second for pages that reloaded.
      */
     private static void notifyPlatformOpen(boolean open) {
-        if (browser == null) {
+        if (uiBrowser == null) {
             return;
         }
-        browser.executeJavaScript(
+        uiBrowser.executeJavaScript(
                 "(function(){if(typeof window.__ccSetPlatformOpen==='function')"
                         + "{window.__ccSetPlatformOpen(" + open + ");}})();",
-                browser.getURL(),
+                uiBrowser.getURL(),
                 0
         );
     }
-
-    // ---- Once-a-second page state reassert --------------------------------------------------
-    //
-    // Two fire-and-forget signals, repeated so that a page that reloaded (service worker update,
-    // F5) relearns them within a second. The platform-open flag is the live one; the overlay flag
-    // is legacy for front-end builds from before the platform-open bridge, which the service
-    // worker can keep serving for one more load - current builds map it onto the same flag.
 
     private static final int REASSERT_INTERVAL_TICKS = 20;
 
@@ -367,19 +252,6 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
         ticksSinceReassert = 0;
         notifyPlatformOpen(platformShown);
-        sendLegacyOverlayFlag(!platformShown);
-    }
-
-    private static void sendLegacyOverlayFlag(boolean overlay) {
-        if (browser == null) {
-            return;
-        }
-        browser.executeJavaScript(
-                "(function(){if(typeof window.__ccSetOverlayMode==='function')"
-                        + "{window.__ccSetOverlayMode(" + overlay + ");}})();",
-                browser.getURL(),
-                0
-        );
     }
 
     static boolean matchesBrowserKey(KeyEvent event) {
@@ -394,76 +266,104 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserScaleBridge.register();
             BrowserConsoleLog.register();
             BrowserCrashGuard.register();
-            BrowserCollapseAckBridge.register();
+            BrowserToastRectsBridge.register();
             BrowserAccelBridge.register();
             registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
             BrowserLoadGuard.register();
-            ensureBrowser();
+            ensureBrowsers();
             LOGGER.info("MCEF initialized (accelerated paint: {}). Press B to open the browser.",
                     McefBootstrap.isAcceleratedPaint());
         });
     }
 
-    private static void ensureBrowser() {
-        if (browser == null) {
+    private static void ensureBrowsers() {
+        if (uiBrowser == null) {
             platformShown = false;
-            BrowserLoadGuard.reset();
-            // Boot straight on the platform route: the page pre-renders the whole app inside the
-            // collapsed wrapper, so the very first open is as instant as every later one. What is
-            // painted over the world meanwhile is decided by the platform-open flag, not by the
-            // route - a fresh page defaults to "closed" until told otherwise.
-            browser = createBrowser(ITEMS_PATH);
-            lastAppliedZoom = 0;
-            // A fresh browser holds no picture yet; nothing may go over the world until the page
-            // confirms it is in the collapsed state and paints past that confirmation.
-            platformClosedAtNanos = System.nanoTime();
-            collapseBarNanos = Long.MAX_VALUE;
+            // Boots straight on the platform route, permanently expanded: the very first open is
+            // as instant as every later one, and state (route, scroll, forms) survives closes.
+            uiBrowser = createBrowser(platformBootUrl());
+        }
+        if (overlayBrowser == null) {
+            BrowserToastRectsBridge.reset();
+            overlayBrowser = createBrowser(overlayBootUrl());
         }
     }
 
     /** The URL a browser retries or falls back to - the load guard's target. */
-    static String bootUrl(MCEFBrowser ignored) {
-        return pageUrl(ITEMS_PATH);
+    static String bootUrl(MCEFBrowser browser) {
+        return isOverlayBrowser(browser) ? overlayBootUrl() : platformBootUrl();
     }
 
-    private static String pageUrl(String path) {
-        return withClientParams(CybercoreConfig.getBaseUrl() + path);
+    private static String platformBootUrl() {
+        return withClientParams(CybercoreConfig.getBaseUrl() + ITEMS_PATH) + "&ccRole=platform";
+    }
+
+    private static String overlayBootUrl() {
+        return withClientParams(CybercoreConfig.getBaseUrl() + NOTHING_PATH) + "&ccRole=overlay";
     }
 
     static void reloadWithNewBaseUrl() {
-        recreateBrowser();
+        recreateBrowsers();
     }
 
-    /** Full teardown and boot of a fresh browser - for changes fixed at creation time. */
-    private static void recreateBrowser() {
+    /** Full teardown and boot of fresh browsers - for changes fixed at creation time. */
+    private static void recreateBrowsers() {
         // An open screen holds a reference to the browser we are about to close.
         Minecraft client = Minecraft.getInstance();
         if (client.screen instanceof BrowserScreen) {
             client.setScreen(null);
         }
         deactivatePlatform();
-        closeBrowserQuietly(browser);
-        browser = null;
+        closeBrowserQuietly(uiBrowser);
+        closeBrowserQuietly(overlayBrowser);
+        uiBrowser = null;
+        overlayBrowser = null;
         BrowserTexture.release();
         BrowserTextInputTracker.reset();
-        ensureBrowser();
+        BrowserToastRectsBridge.reset();
+        ensureBrowsers();
     }
 
     /**
      * The GPU/CPU frame choice from the site's settings (see BrowserAccelBridge). The path is
-     * fixed at browser creation, so a change means persisting and recreating.
+     * fixed at browser creation, so a change means persisting and recreating both browsers.
      */
     static void applyGpuFrames(boolean enabled) {
         if (enabled == CybercoreConfig.isAcceleratedPaintAllowed()) {
             return;
         }
         CybercoreConfig.setAcceleratedPaintAllowed(enabled);
-        LOGGER.info("GPU-shared frames switched {} from the site settings - recreating the browser.",
+        LOGGER.info("GPU-shared frames switched {} from the site settings - recreating browsers.",
                 enabled ? "on" : "off");
         McefBootstrap.reapplyAccelerationSupport();
-        recreateBrowser();
+        recreateBrowsers();
+    }
+
+    // ---- Toast hit-testing --------------------------------------------------------------------
+    //
+    // The overlay page reports the live bounding boxes of its toasts (BrowserToastRectsBridge) in
+    // its own client coordinates, which are exactly the coordinates the mod feeds browsers as
+    // mouse positions (framebuffer pixels through the same DIP conversion). A click inside any of
+    // them belongs to a toast; everything else belongs to whatever is underneath.
+
+    static boolean isToastAtGui(double guiX, double guiY) {
+        return isToastAtFb(toFbX(guiX), toFbY(guiY));
+    }
+
+    static boolean isToastAtFb(int fbX, int fbY) {
+        return BrowserToastRectsBridge.hit(
+                CybercoreBrowser.toBrowserCoord(fbX),
+                CybercoreBrowser.toBrowserCoord(fbY));
+    }
+
+    static int toFbX(double guiX) {
+        return (int) (guiX * Minecraft.getInstance().getWindow().getGuiScale());
+    }
+
+    static int toFbY(double guiY) {
+        return (int) (guiY * Minecraft.getInstance().getWindow().getGuiScale());
     }
 
     /** CEF's own ceiling for the windowless frame rate. */
@@ -497,12 +397,15 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     /** Reapplies only when the window lands on a monitor with a different refresh rate. */
     private static void syncBrowserFrameRate() {
-        if (browser == null) {
+        if (uiBrowser == null) {
             return;
         }
         int target = maxFrameRate();
         if (target != lastAppliedFrameRate) {
-            browser.setWindowlessFrameRate(target);
+            uiBrowser.setWindowlessFrameRate(target);
+            if (overlayBrowser != null) {
+                overlayBrowser.setWindowlessFrameRate(target);
+            }
             lastAppliedFrameRate = target;
         }
     }
@@ -530,7 +433,8 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     /**
      * Persists the scale the player picked in the site's settings (see BrowserScaleBridge).
-     * {@link #syncBrowserZoom} picks it up on the next tick.
+     * {@link #syncBrowserZoom} picks it up on the next tick, for both browsers - toasts scale
+     * together with the platform.
      */
     static void applyUserBrowserScale(int percent) {
         int clamped = Math.max(CybercoreConfig.MIN_BROWSER_SCALE_PERCENT,
@@ -565,14 +469,17 @@ public class CybercoreClientClient implements ClientModInitializer {
      * at device scale 1 (see CybercoreBrowser).
      */
     private static void syncBrowserZoom() {
-        if (browser == null) {
+        if (uiBrowser == null) {
             return;
         }
         double userScale = CybercoreConfig.getBrowserScalePercent() / 100.0;
         double targetScale = McefBootstrap.isAcceleratedPaint() ? contentScale * userScale : userScale;
         double zoom = Math.log(targetScale) / Math.log(1.2);
         if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
-            browser.setZoomLevel(zoom);
+            uiBrowser.setZoomLevel(zoom);
+            if (overlayBrowser != null) {
+                overlayBrowser.setZoomLevel(zoom);
+            }
             lastAppliedZoom = zoom;
         }
     }
@@ -607,18 +514,12 @@ public class CybercoreClientClient implements ClientModInitializer {
             + "location.reload();})();";
 
     /**
-     * Ordinary reload. The service worker updates itself and re-fetches only the chunks whose hash
+     * Ordinary reload of both pages. The service worker updates itself and re-fetches only what
      * changed, so this is what a page refresh should cost.
      */
     static void reloadBrowser() {
-        if (browser == null) {
-            return;
-        }
-        if (BrowserLoadGuard.isParked(browser)) {
-            BrowserLoadGuard.loadNow(browser, bootUrl(browser));
-            return;
-        }
-        browser.reload();
+        reloadOne(uiBrowser, false);
+        reloadOne(overlayBrowser, false);
     }
 
     /**
@@ -626,6 +527,11 @@ public class CybercoreClientClient implements ClientModInitializer {
      * the escape hatch for when a bad build got itself cached, not something to do routinely.
      */
     static void hardReloadBrowser() {
+        reloadOne(uiBrowser, true);
+        reloadOne(overlayBrowser, false);
+    }
+
+    private static void reloadOne(CybercoreBrowser browser, boolean hard) {
         if (browser == null) {
             return;
         }
@@ -633,17 +539,21 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserLoadGuard.loadNow(browser, bootUrl(browser));
             return;
         }
-        browser.executeJavaScript(CLEAR_CACHE_AND_RELOAD_JS, browser.getURL(), 0);
+        if (hard) {
+            browser.executeJavaScript(CLEAR_CACHE_AND_RELOAD_JS, browser.getURL(), 0);
+        } else {
+            browser.reload();
+        }
     }
 
-    private static CybercoreBrowser createBrowser(String path) {
+    private static CybercoreBrowser createBrowser(String url) {
         // Built by hand instead of MCEF.createBrowser, which hardwires the base class: ours is the
         // same browser plus HiDPI and richer wheel input. shared_texture is only requested when
         // the platform probe accepted it - CEF ignores an unsupported request silently.
         int frameRate = maxFrameRate();
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
-                pageUrl(path),
+                url,
                 true,
                 new MCEFBrowserSettings(frameRate, McefBootstrap.isAcceleratedPaint())
         );

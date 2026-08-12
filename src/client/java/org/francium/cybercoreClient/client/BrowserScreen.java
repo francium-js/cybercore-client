@@ -78,6 +78,38 @@ public class BrowserScreen extends Screen {
 
     private boolean forwardedBrowserKey = false;
 
+    // ---- Toast-aware mouse routing -----------------------------------------------------------
+    //
+    // Toasts are painted by the overlay browser on top of this screen, so the cursor must talk
+    // to whichever layer it is actually over: hover and clicks inside a toast's reported box go
+    // to the overlay browser, everything else to the platform. On every handoff the abandoned
+    // browser gets one far-offscreen move so its hover state clears - otherwise a button under
+    // a toast would stay lit while the player hovers the toast above it.
+
+    /** Far offscreen: Chromium treats it as "the pointer left the page". */
+    private static final int MOUSE_PARK = -10_000;
+
+    private CybercoreBrowser hoverTarget;
+
+    private CybercoreBrowser pressTarget;
+
+    private CybercoreBrowser mouseTargetAt(double guiX, double guiY) {
+        CybercoreBrowser overlay = CybercoreClientClient.overlayBrowser;
+        if (overlay != null && CybercoreClientClient.isToastAtGui(guiX, guiY)) {
+            return overlay;
+        }
+        return browser;
+    }
+
+    private CybercoreBrowser retarget(double guiX, double guiY) {
+        CybercoreBrowser target = mouseTargetAt(guiX, guiY);
+        if (hoverTarget != null && hoverTarget != target) {
+            hoverTarget.sendMouseMove(MOUSE_PARK, MOUSE_PARK);
+        }
+        hoverTarget = target;
+        return target;
+    }
+
     public BrowserScreen(CybercoreBrowser browser) {
         super(Component.translatable("gui.cybercore.browser.title"));
         this.browser = browser;
@@ -128,27 +160,33 @@ public class BrowserScreen extends Screen {
 
     @Override
     public void mouseMoved(double x, double y) {
-        browser.sendMouseMove(toBrowserX(x), toBrowserY(y));
+        retarget(x, y).sendMouseMove(toBrowserX(x), toBrowserY(y));
     }
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean isFocused) {
         setKeyboardModifiers(event.modifiers());
-        browser.sendMousePress(toBrowserX(event.x()), toBrowserY(event.y()), event.button());
+        pressTarget = retarget(event.x(), event.y());
+        pressTarget.sendMousePress(toBrowserX(event.x()), toBrowserY(event.y()), event.button());
         return true;
     }
 
     @Override
     public boolean mouseReleased(MouseButtonEvent event) {
         setKeyboardModifiers(event.modifiers());
-        browser.sendMouseRelease(toBrowserX(event.x()), toBrowserY(event.y()), event.button());
+        // Capture semantics: the release belongs to whoever got the press, wherever the cursor
+        // has drifted meanwhile - exactly how a browser treats a drag out of an element.
+        CybercoreBrowser target = pressTarget != null ? pressTarget : retarget(event.x(), event.y());
+        pressTarget = null;
+        target.sendMouseRelease(toBrowserX(event.x()), toBrowserY(event.y()), event.button());
         return true;
     }
 
     @Override
     public boolean mouseDragged(MouseButtonEvent event, double deltaX, double deltaY) {
         setKeyboardModifiers(event.modifiers());
-        browser.sendMouseMove(toBrowserX(event.x()), toBrowserY(event.y()));
+        CybercoreBrowser target = pressTarget != null ? pressTarget : retarget(event.x(), event.y());
+        target.sendMouseMove(toBrowserX(event.x()), toBrowserY(event.y()));
         return true;
     }
 

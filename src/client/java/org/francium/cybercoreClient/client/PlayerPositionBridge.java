@@ -46,7 +46,7 @@ public final class PlayerPositionBridge {
             return;
         }
 
-        if (CybercoreClientClient.browser == null) {
+        if (CybercoreClientClient.uiBrowser == null) {
             return;
         }
 
@@ -59,7 +59,7 @@ public final class PlayerPositionBridge {
     }
 
     private static void send(String script) {
-        MCEFBrowser browser = CybercoreClientClient.browser;
+        MCEFBrowser browser = CybercoreClientClient.uiBrowser;
         if (browser != null) {
             browser.executeJavaScript(script, browser.getURL(), 0);
         }

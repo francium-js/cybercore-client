@@ -36,7 +36,7 @@ public final class ClientEvents {
     }
 
     private static void dispatch(String json) {
-        MCEFBrowser browser = CybercoreClientClient.browser;
+        MCEFBrowser browser = CybercoreClientClient.uiBrowser;
         if (browser == null) {
             LOGGER.debug("Dropped a Cybercore event, the browser is not up: {}", json);
             return;

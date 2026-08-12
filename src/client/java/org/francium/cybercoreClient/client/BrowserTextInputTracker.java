@@ -86,7 +86,7 @@ public final class BrowserTextInputTracker {
     }
 
     private static boolean isOurBrowser(CefBrowser browser) {
-        return CybercoreClientClient.isOurBrowser(browser);
+        return CybercoreClientClient.isUiBrowser(browser);
     }
 
     private static void install(CefFrame frame) {
