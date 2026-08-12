@@ -8,9 +8,11 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.resources.Identifier;
 import org.lwjgl.glfw.GLFW;
@@ -60,10 +62,25 @@ public class CybercoreClientClient implements ClientModInitializer {
                 )
         );
 
-        HudElementRegistry.addLast(
-                Identifier.fromNamespaceAndPath("cybercore-client", "browser_overlay"),
-                new BrowserOverlay()
-        );
+        // The notification layer is NOT a HUD element: it hooks the tail of GameRenderer's GUI
+        // extraction (see GameRendererMixin), so toasts stay visible over chat, menus, the title
+        // screen and loading screens too - the HUD renders only in-world with no screen open.
+
+        // The main menu is the other place the platform may open from. Key mappings never fire
+        // while a screen is up (the screen owns the keyboard), so the title screen gets its own
+        // key hook; every other screen keeps its keys - in chat, B is just a letter.
+        ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
+            if (!(screen instanceof TitleScreen)) {
+                return;
+            }
+            ScreenKeyboardEvents.allowKeyPress(screen).register((s, event) -> {
+                if (!matchesBrowserKey(event)) {
+                    return true;
+                }
+                toggleBrowserScreen(client);
+                return false;
+            });
+        });
 
         CybercoreServer.register();
 
@@ -93,48 +110,47 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserLoadGuard.tick();
             tickPageStateReassert();
 
-            // Outside a world nothing reads the key queue, so anything left in it would replay on
-            // the way back in and open the browser by itself.
-            if (client.level == null) {
-                while (browserKey.consumeClick()) {
-                    // discard
-                }
-                deactivatePlatform();
-                return;
-            }
-
             // The invariant: the platform is shown for as long as its screen is. Screens can
             // disappear by routes that never reach removed() - dying, a kick, a server-opened
-            // container - and the page would otherwise keep the platform visible in a texture
-            // that is now painted over the world. Restating it every tick costs a boolean check.
+            // container, quitting to the menu - and the page would otherwise keep the platform
+            // visible in a texture that is now painted over the world. Restating it every tick
+            // costs a boolean check.
             if (!(client.screen instanceof BrowserScreen)) {
                 deactivatePlatform();
             }
 
             // One toggle per tick, however many presses queued up - acting on each in turn made an
-            // even number cancel itself out.
+            // even number cancel itself out. Clicks only ever register in-world with no screen
+            // open (the title screen path goes through its own key hook); anything queued outside
+            // a world is drained here so it cannot replay on the way back in.
             boolean toggleRequested = false;
             while (browserKey.consumeClick()) {
                 toggleRequested = true;
             }
-            if (!toggleRequested) {
+            if (!toggleRequested || client.level == null) {
                 return;
             }
 
-            if (!McefBootstrap.isReady()) {
-                LOGGER.warn("MCEF is not ready yet, cannot open browser.");
-                return;
-            }
-
-            ensureBrowser();
-            if (client.screen instanceof BrowserScreen) {
-                deactivatePlatform();
-                client.setScreen(null);
-            } else {
-                activatePlatform();
-                client.setScreen(new BrowserScreen(browser));
-            }
+            toggleBrowserScreen(client);
         });
+    }
+
+    private static void toggleBrowserScreen(Minecraft client) {
+        if (!McefBootstrap.isReady()) {
+            LOGGER.warn("MCEF is not ready yet, cannot open browser.");
+            return;
+        }
+
+        ensureBrowser();
+        if (client.screen instanceof BrowserScreen) {
+            deactivatePlatform();
+            // Outside a world this reopens the title screen by itself - vanilla setScreen(null)
+            // falls back to it whenever there is no level to return to.
+            client.setScreen(null);
+        } else {
+            activatePlatform();
+            client.setScreen(new BrowserScreen(browser));
+        }
     }
 
     private static void closeBrowserQuietly(MCEFBrowser browser) {

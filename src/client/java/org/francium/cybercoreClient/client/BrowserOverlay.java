@@ -2,26 +2,30 @@ package org.francium.cybercoreClient.client;
 
 import com.mojang.blaze3d.platform.Window;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowser;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 
 /**
- * Draws the browser over the world whenever no screen is open. The page keeps its platform UI
- * collapsed via {@code content-visibility: hidden} for as long as the mod reports the screen
- * closed, so what this paints is the transparent in-world layer - and the collapse is a CSS flip
- * with no intermediate frames, so there is nothing to gate on.
+ * Draws the transparent in-world layer (toasts, glitch effects) on top of whatever the game is
+ * currently showing: the HUD, chat, any menu, the title screen, world-loading screens and the
+ * resource-pack overlay alike. Hooked from the tail of {@code GameRenderer.extractGui} (see
+ * GameRendererMixin), after everything vanilla has been extracted, in a stratum of its own - a
+ * notification is never hidden behind the thing the player happens to be looking at.
+ *
+ * <p>The one exception is {@link BrowserScreen}: there the browser texture IS the screen, and
+ * painting it a second time would double every toast.
  */
-public class BrowserOverlay implements HudElement {
+public final class BrowserOverlay {
 
-    private int lastWidth = 0;
-    private int lastHeight = 0;
-    private MCEFBrowser lastBrowser;
+    private static int lastWidth = 0;
+    private static int lastHeight = 0;
+    private static MCEFBrowser lastBrowser;
 
-    @Override
-    public void extractRenderState(GuiGraphicsExtractor graphics, DeltaTracker deltaTracker) {
+    private BrowserOverlay() {
+    }
+
+    public static void extract(GuiGraphicsExtractor graphics) {
         if (!McefBootstrap.isReady()) {
             return;
         }
@@ -31,7 +35,7 @@ public class BrowserOverlay implements HudElement {
         }
         Minecraft mc = Minecraft.getInstance();
 
-        if (mc.screen != null) {
+        if (mc.screen instanceof BrowserScreen) {
             return;
         }
 
@@ -58,6 +62,7 @@ public class BrowserOverlay implements HudElement {
         Identifier texture = BrowserTexture.resolve(browser);
         if (texture != null) {
             BrowserScreen.applyBgraSwizzle(browser);
+            graphics.nextStratum();
             int scaledWidth = window.getGuiScaledWidth();
             int scaledHeight = window.getGuiScaledHeight();
             graphics.blit(
