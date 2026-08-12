@@ -234,6 +234,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserClientFlag.register();
             BrowserTextInputTracker.register();
             BrowserEscapeBridge.register();
+            BrowserScaleBridge.register();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
             BrowserLoadGuard.register();
@@ -317,10 +318,38 @@ public class CybercoreClientClient implements ClientModInitializer {
      * setup, replacing the old zoom hack that only enlarged a 1x layout and left retina displays
      * soft.
      */
-    private static volatile float displayScale = 1f;
+    private static volatile float contentScale = 1f;
 
+    /**
+     * The scale Chromium actually sees: the OS content scale times the player's manual
+     * percentage from the site's settings page. The multiplier exists because the OS value
+     * cannot be trusted everywhere - Linux Xft.dpi/Wayland setups lie about it routinely.
+     */
     static float displayScale() {
-        return displayScale;
+        return contentScale * CybercoreConfig.getBrowserScalePercent() / 100f;
+    }
+
+    /**
+     * Applies the scale the player picked in the site's settings (see BrowserScaleBridge) and
+     * persists it, so the next launch boots with it already in place.
+     */
+    static void applyUserBrowserScale(int percent) {
+        int clamped = Math.max(CybercoreConfig.MIN_BROWSER_SCALE_PERCENT,
+                Math.min(CybercoreConfig.MAX_BROWSER_SCALE_PERCENT, percent));
+        if (clamped == CybercoreConfig.getBrowserScalePercent()) {
+            return;
+        }
+        CybercoreConfig.setBrowserScalePercent(clamped);
+        // The software path picks the new factor up through a resize: the framebuffer size is
+        // unchanged, but the DIP conversion in CybercoreBrowser now lands on different numbers,
+        // and WasResized makes CEF re-query getScreenInfo. BrowserScreen/BrowserOverlay only
+        // resize when the framebuffer changes, so this one is on us. The accelerated path keeps
+        // its size and gets the zoom fallback on the next tick (refreshDisplayScale) instead -
+        // resizing there risks the frame filter dropping every frame.
+        if (browser != null && !McefBootstrap.isAcceleratedPaint()) {
+            var window = Minecraft.getInstance().getWindow();
+            browser.resize(Math.max(1, window.getWidth()), Math.max(1, window.getHeight()));
+        }
     }
 
     private static double lastAppliedZoom = 0;
@@ -332,14 +361,14 @@ public class CybercoreClientClient implements ClientModInitializer {
             GLFW.glfwGetWindowContentScale(client.getWindow().handle(), sx, sy);
             float scale = sx.get(0);
             if (scale > 0f) {
-                displayScale = scale;
+                contentScale = scale;
             }
         }
 
         // The accelerated path runs at scale 1 (see CybercoreBrowser) and falls back on zoom for
         // OS display scaling - the pre-HiDPI behavior, kept because it is the one that works there.
         if (browser != null && McefBootstrap.isAcceleratedPaint()) {
-            double zoom = Math.log(displayScale) / Math.log(1.2);
+            double zoom = Math.log(displayScale()) / Math.log(1.2);
             if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
                 browser.setZoomLevel(zoom);
                 lastAppliedZoom = zoom;

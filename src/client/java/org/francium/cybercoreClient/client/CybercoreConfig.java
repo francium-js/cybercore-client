@@ -19,10 +19,23 @@ public final class CybercoreConfig {
     private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("cybercore-client.properties");
     private static final String KEY_BASE_URL = "baseUrl";
     private static final String KEY_SWAP_RED_BLUE = "swapRedBlue";
+    private static final String KEY_BROWSER_SCALE = "browserScalePercent";
 
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
 
+    static final int DEFAULT_BROWSER_SCALE_PERCENT = 100;
+    static final int MIN_BROWSER_SCALE_PERCENT = 50;
+    static final int MAX_BROWSER_SCALE_PERCENT = 200;
+
     private static volatile String baseUrl = DEFAULT_BASE_URL;
+
+    /**
+     * The player's manual browser scale, in percent, on top of the OS content scale. The escape
+     * hatch for machines where the auto-detected scale is wrong (Linux Xft.dpi/Wayland lying,
+     * mismatched Windows laptop setups): set from the site's settings page over the console
+     * channel (see BrowserScaleBridge) and persisted here so it applies from game launch.
+     */
+    private static volatile int browserScalePercent = DEFAULT_BROWSER_SCALE_PERCENT;
 
     /**
      * Whether GPU-shared browser frames need their red and blue channels swapped.
@@ -55,6 +68,19 @@ public final class CybercoreConfig {
         return swapRedBlue;
     }
 
+    static int getBrowserScalePercent() {
+        return browserScalePercent;
+    }
+
+    static void setBrowserScalePercent(int percent) {
+        browserScalePercent = clampBrowserScale(percent);
+        save();
+    }
+
+    private static int clampBrowserScale(int percent) {
+        return Math.max(MIN_BROWSER_SCALE_PERCENT, Math.min(MAX_BROWSER_SCALE_PERCENT, percent));
+    }
+
     private static void load() {
         if (!Files.isRegularFile(FILE)) {
             return;
@@ -76,12 +102,22 @@ public final class CybercoreConfig {
         if (storedSwap != null && !storedSwap.isBlank()) {
             swapRedBlue = Boolean.parseBoolean(storedSwap.trim());
         }
+
+        String storedScale = props.getProperty(KEY_BROWSER_SCALE);
+        if (storedScale != null && !storedScale.isBlank()) {
+            try {
+                browserScalePercent = clampBrowserScale(Integer.parseInt(storedScale.trim()));
+            } catch (NumberFormatException e) {
+                LOGGER.warn("Ignoring malformed {} value: {}", KEY_BROWSER_SCALE, storedScale);
+            }
+        }
     }
 
     private static void save() {
         Properties props = new Properties();
         props.setProperty(KEY_BASE_URL, baseUrl);
         props.setProperty(KEY_SWAP_RED_BLUE, String.valueOf(swapRedBlue));
+        props.setProperty(KEY_BROWSER_SCALE, String.valueOf(browserScalePercent));
         try {
             Files.createDirectories(FILE.getParent());
             try (OutputStream out = Files.newOutputStream(FILE)) {
