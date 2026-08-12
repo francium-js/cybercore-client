@@ -48,6 +48,13 @@ public class BrowserOverlay implements HudElement {
             lastHeight = fbHeight;
         }
 
+        // Until the page paints a frame newer than the moment the platform closed, the texture
+        // still shows the platform itself. A healthy page repaints within a frame or two; a hung
+        // or crashed renderer never does, and its frozen last frame must not hang over the world.
+        if (!CybercoreClientClient.hasPaintedSinceClose()) {
+            return;
+        }
+
         Identifier texture = BrowserTexture.resolve(browser);
         if (texture != null) {
             BrowserScreen.applyBgraSwizzle(browser);

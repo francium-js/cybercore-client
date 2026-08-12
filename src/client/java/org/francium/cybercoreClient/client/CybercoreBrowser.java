@@ -7,10 +7,12 @@ import net.ccbluex.liquidbounce.mcef.cef.MCEFClient;
 import net.minecraft.client.Minecraft;
 import org.cef.browser.CefBrowser;
 import org.cef.event.CefMouseWheelEvent;
+import org.cef.handler.CefAcceleratedPaintInfo;
 import org.cef.handler.CefScreenInfo;
 import org.lwjgl.glfw.GLFW;
 
 import java.awt.Rectangle;
+import java.nio.ByteBuffer;
 
 /**
  * {@link MCEFBrowser} plus what the mod needs from a browser: true HiDPI on the software path and
@@ -103,6 +105,28 @@ final class CybercoreBrowser extends MCEFBrowser {
         }
         sendMouseWheelEvent(new CefMouseWheelEvent(
                 CefMouseWheelEvent.WHEEL_UNIT_SCROLL, x, y, amount, glfwModifiers));
+    }
+
+    // ---- Paint freshness ---------------------------------------------------------------------
+    //
+    // Every frame Chromium delivers, software or accelerated, stamps a clock the mod reads to
+    // decide whether the texture may be drawn over the world (see BrowserOverlay): after the
+    // platform closes, the picture in the texture is the platform itself until the page paints
+    // its collapsed state - and if the renderer hung or died, that frame never comes and the
+    // platform would stay frozen over the game forever.
+
+    @Override
+    public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
+                        ByteBuffer buffer, int width, int height) {
+        super.onPaint(browser, popup, dirtyRects, buffer, width, height);
+        CybercoreClientClient.notePaint();
+    }
+
+    @Override
+    public void onAcceleratedPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
+                                   CefAcceleratedPaintInfo info) {
+        super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+        CybercoreClientClient.notePaint();
     }
 
     @Override

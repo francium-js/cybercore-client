@@ -172,7 +172,29 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         platformShown = false;
+        platformClosedAtNanos = System.nanoTime();
         notifyPlatformOpen(false);
+    }
+
+    // ---- Paint freshness ----------------------------------------------------------------------
+    //
+    // The moment the platform closes, the browser texture still holds the platform's last frame.
+    // A healthy page paints its collapsed state within a frame or two and the clock moves past
+    // the close stamp; a hung or dead renderer never paints again, and without this gate the mod
+    // would keep drawing that frozen platform frame over the world forever.
+
+    private static volatile long lastPaintNanos = Long.MIN_VALUE;
+
+    private static volatile long platformClosedAtNanos = 0;
+
+    /** Called from CEF's paint threads (see CybercoreBrowser). */
+    static void notePaint() {
+        lastPaintNanos = System.nanoTime();
+    }
+
+    /** Whether the texture holds a frame painted after the platform screen last closed. */
+    static boolean hasPaintedSinceClose() {
+        return lastPaintNanos - platformClosedAtNanos > 0;
     }
 
     /**
@@ -211,7 +233,6 @@ public class CybercoreClientClient implements ClientModInitializer {
         ticksSinceReassert = 0;
         notifyPlatformOpen(platformShown);
         sendLegacyOverlayFlag(!platformShown);
-        syncBrowserZoom(true);
     }
 
     private static void sendLegacyOverlayFlag(boolean overlay) {
@@ -236,6 +257,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserTextInputTracker.register();
             BrowserEscapeBridge.register();
             BrowserScaleBridge.register();
+            registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
             // down when the game starts never gets to paint Chromium's error page.
             BrowserLoadGuard.register();
@@ -255,6 +277,9 @@ public class CybercoreClientClient implements ClientModInitializer {
             // route - a fresh page defaults to "closed" until told otherwise.
             browser = createBrowser(ITEMS_PATH);
             lastAppliedZoom = 0;
+            // A fresh browser holds no picture yet; nothing may go over the world until it
+            // actually paints one.
+            platformClosedAtNanos = System.nanoTime();
         }
     }
 
@@ -360,7 +385,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             }
         }
 
-        syncBrowserZoom(false);
+        syncBrowserZoom();
     }
 
     /**
@@ -369,21 +394,39 @@ public class CybercoreClientClient implements ClientModInitializer {
      * layout rescales, hit-testing follows, and the raster stays at the device scale, so nothing
      * goes soft. The accelerated path additionally folds the OS scale in, since it runs Chromium
      * at device scale 1 (see CybercoreBrowser).
-     *
-     * @param force reapply even if unchanged - the once-a-second reassert, in case a reload or
-     *              navigation dropped the per-host zoom entry.
      */
-    private static void syncBrowserZoom(boolean force) {
+    private static void syncBrowserZoom() {
         if (browser == null) {
             return;
         }
         double userScale = CybercoreConfig.getBrowserScalePercent() / 100.0;
         double targetScale = McefBootstrap.isAcceleratedPaint() ? contentScale * userScale : userScale;
         double zoom = Math.log(targetScale) / Math.log(1.2);
-        if (force || Math.abs(zoom - lastAppliedZoom) > 0.001) {
+        if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
             browser.setZoomLevel(zoom);
             lastAppliedZoom = zoom;
         }
+    }
+
+    /**
+     * A finished load starts from Chromium's default zoom, so whatever was applied before must
+     * not be assumed anymore. Marking the default makes the next tick reapply a non-default
+     * target and costs nothing when the target is the default itself.
+     */
+    static void markZoomStale() {
+        lastAppliedZoom = 0;
+    }
+
+    private static void registerZoomLoadHandler() {
+        MCEF.INSTANCE.getClient().addLoadHandler(new org.cef.handler.CefLoadHandlerAdapter() {
+            @Override
+            public void onLoadEnd(org.cef.browser.CefBrowser cefBrowser,
+                                  org.cef.browser.CefFrame frame, int httpStatusCode) {
+                if (isOurBrowser(cefBrowser) && frame.isMain()) {
+                    markZoomStale();
+                }
+            }
+        });
     }
 
     private static final String CLEAR_CACHE_AND_RELOAD_JS =
