@@ -123,6 +123,14 @@ public final class McefBootstrap {
      * back to the copy path.
      */
     private static void resolveAccelerationSupport() {
+        // Opt-in via config: MCEF can lose a shared frame silently mid-import, and a lost frame
+        // is a stale picture frozen over the world (see CybercoreConfig for the full story).
+        if (!CybercoreConfig.isAcceleratedPaintAllowed()) {
+            LOGGER.info("GPU-shared browser frames are disabled by config; using software frames.");
+            acceleratedPaint = false;
+            return;
+        }
+
         MCEFAccelerationSupport.Support support;
         try {
             support = MCEFAccelerationSupport.getAccelerationSupport();

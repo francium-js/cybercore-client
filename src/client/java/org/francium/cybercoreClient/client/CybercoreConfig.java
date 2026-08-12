@@ -20,8 +20,18 @@ public final class CybercoreConfig {
     private static final String KEY_BASE_URL = "baseUrl";
     private static final String KEY_SWAP_RED_BLUE = "swapRedBlue";
     private static final String KEY_BROWSER_SCALE = "browserScalePercent";
+    private static final String KEY_ACCELERATED_PAINT = "acceleratedPaint";
 
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
+
+    /**
+     * GPU-shared browser frames are opt-in. The import of a shared frame can fail silently
+     * inside MCEF (importFrame returning null skips the frame with no log), which froze stale
+     * pictures over the world on Windows/NVIDIA, and Intel machines flashed transparent frames -
+     * while the software path has been flawless everywhere it ran. Flip to true to trade that
+     * reliability for the cheaper GPU handoff.
+     */
+    private static final boolean DEFAULT_ACCELERATED_PAINT = false;
 
     static final int DEFAULT_BROWSER_SCALE_PERCENT = 100;
     static final int MIN_BROWSER_SCALE_PERCENT = 50;
@@ -36,6 +46,8 @@ public final class CybercoreConfig {
      * channel (see BrowserScaleBridge) and persisted here so it applies from game launch.
      */
     private static volatile int browserScalePercent = DEFAULT_BROWSER_SCALE_PERCENT;
+
+    private static volatile boolean acceleratedPaint = DEFAULT_ACCELERATED_PAINT;
 
     /**
      * Whether GPU-shared browser frames need their red and blue channels swapped.
@@ -72,6 +84,10 @@ public final class CybercoreConfig {
         return browserScalePercent;
     }
 
+    static boolean isAcceleratedPaintAllowed() {
+        return acceleratedPaint;
+    }
+
     static void setBrowserScalePercent(int percent) {
         browserScalePercent = clampBrowserScale(percent);
         save();
@@ -103,6 +119,11 @@ public final class CybercoreConfig {
             swapRedBlue = Boolean.parseBoolean(storedSwap.trim());
         }
 
+        String storedAccelerated = props.getProperty(KEY_ACCELERATED_PAINT);
+        if (storedAccelerated != null && !storedAccelerated.isBlank()) {
+            acceleratedPaint = Boolean.parseBoolean(storedAccelerated.trim());
+        }
+
         String storedScale = props.getProperty(KEY_BROWSER_SCALE);
         if (storedScale != null && !storedScale.isBlank()) {
             try {
@@ -118,6 +139,7 @@ public final class CybercoreConfig {
         props.setProperty(KEY_BASE_URL, baseUrl);
         props.setProperty(KEY_SWAP_RED_BLUE, String.valueOf(swapRedBlue));
         props.setProperty(KEY_BROWSER_SCALE, String.valueOf(browserScalePercent));
+        props.setProperty(KEY_ACCELERATED_PAINT, String.valueOf(acceleratedPaint));
         try {
             Files.createDirectories(FILE.getParent());
             try (OutputStream out = Files.newOutputStream(FILE)) {
