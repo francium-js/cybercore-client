@@ -35,14 +35,22 @@ public final class ClientEvents {
         );
     }
 
+    /** Both browsers: each page decides for itself what an event means on its surface. */
     private static void dispatch(String json) {
-        MCEFBrowser browser = CybercoreClientClient.browser;
-        if (browser == null) {
-            LOGGER.debug("Dropped a Cybercore event, the browser is not up: {}", json);
+        MCEFBrowser overlay = CybercoreClientClient.overlayBrowser;
+        MCEFBrowser platform = CybercoreClientClient.platformBrowser;
+        if (overlay == null && platform == null) {
+            LOGGER.debug("Dropped a Cybercore event, no browser is up: {}", json);
             return;
         }
 
-        browser.executeJavaScript(dispatchScript(json), browser.getURL(), 0);
+        String script = dispatchScript(json);
+        if (overlay != null) {
+            overlay.executeJavaScript(script, overlay.getURL(), 0);
+        }
+        if (platform != null) {
+            platform.executeJavaScript(script, platform.getURL(), 0);
+        }
     }
 
     private static String dispatchScript(String json) {

@@ -39,7 +39,8 @@ final class BrowserClientFlag {
             @Override
             public void onLoadStart(CefBrowser browser, CefFrame frame, CefRequest.TransitionType transitionType) {
                 // On load start, so the flag is in storage before the app boots and asks.
-                if (browser != CybercoreClientClient.browser || frame == null || !frame.isMain()) {
+                if (!CybercoreClientClient.isOurBrowser(browser)
+                        || frame == null || !frame.isMain()) {
                     return;
                 }
                 try {

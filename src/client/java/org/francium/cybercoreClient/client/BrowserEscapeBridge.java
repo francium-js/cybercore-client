@@ -32,7 +32,8 @@ final class BrowserEscapeBridge {
             @Override
             public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level,
                                             String message, String source, int line) {
-                if (browser != CybercoreClientClient.browser || !CLOSE_MESSAGE.equals(message)) {
+                if (browser != CybercoreClientClient.platformBrowser
+                        || !CLOSE_MESSAGE.equals(message)) {
                     return false;
                 }
                 closeBrowserScreen();
@@ -45,7 +46,7 @@ final class BrowserEscapeBridge {
         Minecraft client = Minecraft.getInstance();
         client.execute(() -> {
             if (client.screen instanceof BrowserScreen) {
-                CybercoreClientClient.deactivateBrowser();
+                CybercoreClientClient.deactivatePlatform();
                 client.setScreen(null);
             }
         });

@@ -197,7 +197,7 @@ public class BrowserScreen extends Screen {
         forwardedBrowserKey = CybercoreClientClient.matchesBrowserKey(event);
         // Escape is normally the page's call (see BrowserEscapeBridge); on the blank fallback page
         // there is no app to ask.
-        if (event.key() == GLFW.GLFW_KEY_ESCAPE && BrowserLoadGuard.isParked()) {
+        if (event.key() == GLFW.GLFW_KEY_ESCAPE && BrowserLoadGuard.isParked(browser)) {
             onClose();
             return true;
         }
@@ -259,7 +259,7 @@ public class BrowserScreen extends Screen {
     @Override
     public void removed() {
         browser.setFocus(false);
-        CybercoreClientClient.deactivateBrowser();
+        CybercoreClientClient.deactivatePlatform();
         super.removed();
     }
 

@@ -8,6 +8,11 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
 
+/**
+ * Draws the overlay browser over the world whenever no screen is open. That browser never holds
+ * anything but the transparent in-world page, so there is nothing to gate on: the wrong-page
+ * frame this element used to defend against cannot exist in its texture.
+ */
 public class BrowserOverlay implements HudElement {
 
     private int lastWidth = 0;
@@ -19,7 +24,7 @@ public class BrowserOverlay implements HudElement {
         if (!McefBootstrap.isReady()) {
             return;
         }
-        MCEFBrowser browser = CybercoreClientClient.browser;
+        MCEFBrowser browser = CybercoreClientClient.overlayBrowser;
         if (browser == null) {
             return;
         }
@@ -40,19 +45,6 @@ public class BrowserOverlay implements HudElement {
             lastBrowser = browser;
             lastWidth = fbWidth;
             lastHeight = fbHeight;
-        }
-
-        // Sized and scaled either way, so the browser is ready the moment its screen opens - but
-        // nothing is painted over the world until the page itself says it is drawing the in-world
-        // layer. Never inferred from a route, never assumed from having asked.
-        if (!BrowserOverlayMode.isConfirmedOverlay()) {
-            return;
-        }
-
-        // Confirmed, but the frame that goes with it may not have reached the texture yet - the
-        // acknowledgement travels faster than the picture, and painting early shows the platform.
-        if (CybercoreClientClient.isOverlayPaintHeld()) {
-            return;
         }
 
         Identifier texture = BrowserTexture.resolve(browser);
