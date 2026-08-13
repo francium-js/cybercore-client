@@ -27,6 +27,18 @@ public class GameRendererMixin {
     }
 
     /**
+     * Second pump per frame, at the tail. With V-sync the render thread spends most of its time
+     * parked in the swap, and a browser frame born mid-game-frame would otherwise wait for the
+     * NEXT frame's head pump - up to a whole display interval of extra latency, and when the
+     * game drops a vblank, two browser frames arrive glued together. A delivery point on each
+     * side of the frame halves both effects; an empty pump costs microseconds.
+     */
+    @Inject(method = "render", at = @At("TAIL"))
+    private void cybercore$pumpCefTail(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo info) {
+        McefBootstrap.pumpMessageLoop();
+    }
+
+    /**
      * {@code extractGui} is the one funnel every piece of 2D the game shows passes through - HUD,
      * chat, menu screens, the title screen, loading screens and the resource-pack overlay - and
      * its tail is past them all, so the browser's transparent notification layer lands on top of
