@@ -446,6 +446,16 @@ public class CybercoreClientClient implements ClientModInitializer {
     }
 
     /**
+     * How many framebuffer pixels one CLIENT pixel of a page covers - the device scale factor
+     * and the page zoom multiplied. Identical for both browsers by construction: the OS scale
+     * sits in the factor (DIP path) or in the zoom (everything else), the player's multiplier
+     * always in the zoom.
+     */
+    static double effectivePageScale() {
+        return (double) contentScale * CybercoreConfig.getBrowserScalePercent() / 100.0;
+    }
+
+    /**
      * Persists the scale the player picked in the site's settings (see BrowserScaleBridge).
      * {@link #syncBrowserZoom} picks it up on the next tick, for both browsers - toasts scale
      * together with the platform.

@@ -62,12 +62,14 @@ final class CybercoreBrowser extends MCEFBrowser {
     }
 
     /**
-     * Framebuffer pixels to the coordinate space this page sees (its client coordinates) - the
-     * same conversion its mouse events go through. The toast hit-test compares mouse positions
-     * against rectangles the overlay page reported in these coordinates.
+     * Framebuffer pixels to the page's CLIENT coordinates - the space getBoundingClientRect and
+     * clientX live in, which the toast rectangles are reported in. Client pixels sit behind BOTH
+     * scaling stages: the device scale factor (DIP browsers) and the page zoom - and since one
+     * path puts the OS scale into the factor and the other into zoom, the combined divisor is
+     * the same product either way: contentScale times the player's multiplier.
      */
     int toClientCoord(int pixels) {
-        return toDip(pixels);
+        return (int) Math.round(pixels / CybercoreClientClient.effectivePageScale());
     }
 
     @Override
