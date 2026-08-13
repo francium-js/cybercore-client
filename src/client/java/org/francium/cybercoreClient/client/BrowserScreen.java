@@ -87,27 +87,35 @@ public class BrowserScreen extends Screen {
     // a toast would stay lit while the player hovers the toast above it.
 
     /** Far offscreen: Chromium treats it as "the pointer left the page". */
-    private static final int MOUSE_PARK = -10_000;
+    static final int MOUSE_PARK = -10_000;
 
     private CybercoreBrowser hoverTarget;
 
     private CybercoreBrowser pressTarget;
 
-    private CybercoreBrowser mouseTargetAt(double guiX, double guiY) {
+    private CybercoreBrowser retargetFb(int fbX, int fbY) {
         CybercoreBrowser overlay = CybercoreClientClient.overlayBrowser;
-        if (overlay != null && CybercoreClientClient.isToastAtGui(guiX, guiY)) {
-            return overlay;
-        }
-        return browser;
-    }
-
-    private CybercoreBrowser retarget(double guiX, double guiY) {
-        CybercoreBrowser target = mouseTargetAt(guiX, guiY);
+        CybercoreBrowser target =
+                overlay != null && CybercoreClientClient.isToastAtFb(fbX, fbY) ? overlay : browser;
         if (hoverTarget != null && hoverTarget != target) {
             hoverTarget.sendMouseMove(MOUSE_PARK, MOUSE_PARK);
         }
         hoverTarget = target;
         return target;
+    }
+
+    private CybercoreBrowser retarget(double guiX, double guiY) {
+        return retargetFb(toBrowserX(guiX), toBrowserY(guiY));
+    }
+
+    /**
+     * Cursor movement, in framebuffer pixels, straight from the GLFW callback (see
+     * MouseHandlerMixin) - the game's own per-frame delivery is not dependable enough for hover.
+     * While a button is held the move follows the press, drag semantics rather than hover.
+     */
+    void cursorMoved(int fbX, int fbY) {
+        CybercoreBrowser target = pressTarget != null ? pressTarget : retargetFb(fbX, fbY);
+        target.sendMouseMove(fbX, fbY);
     }
 
     public BrowserScreen(CybercoreBrowser browser) {
@@ -159,11 +167,6 @@ public class BrowserScreen extends Screen {
     }
 
     @Override
-    public void mouseMoved(double x, double y) {
-        retarget(x, y).sendMouseMove(toBrowserX(x), toBrowserY(y));
-    }
-
-    @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean isFocused) {
         setKeyboardModifiers(event.modifiers());
         pressTarget = retarget(event.x(), event.y());
@@ -184,9 +187,9 @@ public class BrowserScreen extends Screen {
 
     @Override
     public boolean mouseDragged(MouseButtonEvent event, double deltaX, double deltaY) {
+        // The movement itself already went through cursorMoved; this is only here to keep the
+        // modifier mask current and to tell the game the drag was consumed.
         setKeyboardModifiers(event.modifiers());
-        CybercoreBrowser target = pressTarget != null ? pressTarget : retarget(event.x(), event.y());
-        target.sendMouseMove(toBrowserX(event.x()), toBrowserY(event.y()));
         return true;
     }
 
@@ -297,6 +300,13 @@ public class BrowserScreen extends Screen {
     @Override
     public void removed() {
         browser.setFocus(false);
+        // The cursor is leaving both layers: a toast left hovered would hold its countdown for
+        // good, and the platform would reopen with whatever was lit under the cursor still lit.
+        if (hoverTarget != null) {
+            hoverTarget.sendMouseMove(MOUSE_PARK, MOUSE_PARK);
+            hoverTarget = null;
+        }
+        pressTarget = null;
         CybercoreClientClient.deactivatePlatform();
         super.removed();
     }

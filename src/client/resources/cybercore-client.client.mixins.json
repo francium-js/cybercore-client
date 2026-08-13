@@ -4,7 +4,8 @@
   "package": "org.francium.cybercoreClient.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
-    "GameRendererMixin"
+    "GameRendererMixin",
+    "MouseHandlerMixin"
   ],
   "injectors": {
     "defaultRequire": 1

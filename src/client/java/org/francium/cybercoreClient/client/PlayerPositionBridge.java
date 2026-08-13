@@ -46,7 +46,7 @@ public final class PlayerPositionBridge {
             return;
         }
 
-        if (CybercoreClientClient.uiBrowser == null) {
+        if (CybercoreClientClient.overlayBrowser == null) {
             return;
         }
 
@@ -59,7 +59,9 @@ public final class PlayerPositionBridge {
     }
 
     private static void send(String script) {
-        MCEFBrowser browser = CybercoreClientClient.uiBrowser;
+        // The only consumer is the in-world glitch layer (CyberEdgeNoise), which lives in the
+        // overlay browser - the platform copy never mounts it.
+        MCEFBrowser browser = CybercoreClientClient.overlayBrowser;
         if (browser != null) {
             browser.executeJavaScript(script, browser.getURL(), 0);
         }

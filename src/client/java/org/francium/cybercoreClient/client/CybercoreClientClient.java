@@ -1,6 +1,7 @@
 package org.francium.cybercoreClient.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
+import com.mojang.blaze3d.platform.Window;
 import net.ccbluex.liquidbounce.mcef.MCEF;
 import net.ccbluex.liquidbounce.mcef.MCEFPlatform;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowser;
@@ -25,15 +26,18 @@ import org.slf4j.LoggerFactory;
 /**
  * Two MCEF browsers, one web app each, no shared state between the two layers.
  *
- * <p><b>Overlay browser</b> ({@code ccRole=overlay}): nothing but the floating notification
- * layer. Painted on top of everything the game shows - world, chat, menus, loading screens and
- * the platform screen itself - always. Runs on software frames so a notification can never be
- * lost to a GPU driver quirk.
+ * <p><b>Overlay browser</b> ({@code ccRole=overlay}): the floating notification layer and the
+ * in-world glitch layer - everything the player must see while playing. Painted on top of
+ * everything the game shows - world, chat, menus, loading screens and the platform screen itself
+ * - always. Signals the server sends about the world (see ClientEvents, PlayerPositionBridge)
+ * go here, because this is the copy that is on screen out there.
  *
  * <p><b>UI browser</b> ({@code ccRole=platform}): the whole platform, permanently expanded,
  * state preserved across closes. Its texture is painted exclusively while {@link BrowserScreen}
- * is open, so "the platform stuck over the world" is impossible by construction. Runs on
- * GPU-shared frames by default (config/site toggle: {@code gpuFrames}).
+ * is open, so "the platform stuck over the world" is impossible by construction.
+ *
+ * <p>Both run on the same frame path - GPU-shared by default, software when the player flips
+ * {@code gpuFrames} (config/site toggle) - and at the same frame rate. Never one on each.
  *
  * <p>Input: clicks and hover inside a toast's reported rectangle go to the overlay browser
  * (BrowserToastRectsBridge holds the live map), everything else goes to the UI browser or the
@@ -293,12 +297,11 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
         if (overlayBrowser == null) {
             BrowserToastRectsBridge.reset();
-            // ALWAYS software frames: MCEF's GPU path can lose a shared frame without a trace
-            // (importFrame returning null), and a lost frame here is a notification the player
-            // never saw. The page is a handful of toasts, so software costs almost nothing even
-            // at the full refresh rate - its damage is a toast-sized rectangle, not the screen.
-            // The GPU/CPU choice affects only the heavy platform browser.
-            overlayBrowser = createBrowser(overlayBootUrl(), false);
+            // Same frame path as the platform: one GPU/CPU switch for both layers, never a
+            // half-and-half state. On the GPU path this layer inherits MCEF's silent shared-frame
+            // drops too, so a player who sees notifications freeze or vanish flips the same
+            // toggle that fixes the platform.
+            overlayBrowser = createBrowser(overlayBootUrl(), McefBootstrap.isAcceleratedPaint());
         }
     }
 
@@ -359,6 +362,70 @@ public class CybercoreClientClient implements ClientModInitializer {
     // mouse positions (framebuffer pixels through the same DIP conversion). A click inside any of
     // them belongs to a toast; everything else belongs to whatever is underneath.
 
+    /** True while the cursor sits on a toast with no browser screen open - see onCursorMove. */
+    private static boolean toastHovered = false;
+
+    /**
+     * Hover, fed by the raw GLFW cursor callback (see MouseHandlerMixin) instead of the screen's
+     * own {@code mouseMoved}, which the game only delivers once a frame and only while it counts
+     * the window as active.
+     *
+     * <p>Coordinates arrive in window pixels; the browsers work in framebuffer pixels, and the two
+     * differ on every HiDPI setup.
+     */
+    public static void onCursorMove(long windowHandle, double windowX, double windowY) {
+        Minecraft client = Minecraft.getInstance();
+        Window window = client.getWindow();
+        if (window == null || windowHandle != window.handle()) {
+            return;
+        }
+        // A grabbed cursor is the player looking around, not pointing at anything.
+        if (client.mouseHandler.isMouseGrabbed()) {
+            clearToastHover();
+            return;
+        }
+
+        int fbX = (int) (windowX * window.getWidth() / Math.max(1, window.getScreenWidth()));
+        int fbY = (int) (windowY * window.getHeight() / Math.max(1, window.getScreenHeight()));
+
+        if (client.screen instanceof BrowserScreen screen) {
+            // The screen routes between both layers itself, hover state included.
+            toastHovered = false;
+            screen.cursorMoved(fbX, fbY);
+            return;
+        }
+
+        // Any other screen: the platform is not on display, so the only thing under the cursor
+        // that can react is a toast.
+        CybercoreBrowser overlay = overlayBrowser;
+        if (overlay == null) {
+            return;
+        }
+        boolean onToast = isToastAtFb(fbX, fbY);
+        if (onToast) {
+            overlay.sendMouseMove(fbX, fbY);
+            toastHovered = true;
+        } else if (toastHovered) {
+            clearToastHover();
+        }
+    }
+
+    /**
+     * Tells the overlay browser the cursor is gone. A hovered toast holds its countdown, so a
+     * hover the player has long left behind - the screen closed, the mouse went back to the game -
+     * would leave that toast on screen forever.
+     */
+    static void clearToastHover() {
+        if (!toastHovered) {
+            return;
+        }
+        toastHovered = false;
+        CybercoreBrowser overlay = overlayBrowser;
+        if (overlay != null) {
+            overlay.sendMouseMove(BrowserScreen.MOUSE_PARK, BrowserScreen.MOUSE_PARK);
+        }
+    }
+
     static boolean isToastAtGui(double guiX, double guiY) {
         return isToastAtFb(toFbX(guiX), toFbY(guiY));
     }
@@ -398,14 +465,12 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static int lastAppliedFrameRate;
 
     /**
-     * One tempo for both browsers, set by the platform's path: the notification layer must feel
-     * exactly as fluid as the platform beside it, and its software cost is tiny (its damage is a
-     * toast-sized rectangle, not the screen), so it can afford the platform's rate. Only when
-     * the platform itself is on software frames does the CPU cap apply - a full-screen readback
-     * chasing a 180 Hz monitor starves the game (~15 MB per frame at 1440p).
+     * One tempo for both browsers - they share the frame path, so they share its ceiling. On the
+     * CPU path that ceiling is what keeps the game alive: a full-screen readback chasing a 180 Hz
+     * monitor costs ~15 MB per frame at 1440p on the render thread.
      */
-    private static int frameRateFor(boolean uiAcceleratedFrames) {
-        int pathCap = uiAcceleratedFrames ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
+    private static int frameRateFor(boolean acceleratedFrames) {
+        int pathCap = acceleratedFrames ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
         int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
         if (refreshRate <= 0) {
             return Math.min(FALLBACK_BROWSER_FPS, pathCap);

@@ -36,7 +36,11 @@ public final class ClientEvents {
     }
 
     private static void dispatch(String json) {
-        MCEFBrowser browser = CybercoreClientClient.uiBrowser;
+        // These events happen while the player is in the world (a right-click on another player,
+        // and whatever the plugin adds next), so whatever they show has to be on the layer that
+        // is painted there - the overlay browser. The platform's texture is not drawn outside its
+        // own screen, so a card shown by that copy would be invisible.
+        MCEFBrowser browser = CybercoreClientClient.overlayBrowser;
         if (browser == null) {
             LOGGER.debug("Dropped a Cybercore event, the browser is not up: {}", json);
             return;

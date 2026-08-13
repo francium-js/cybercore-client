@@ -13,9 +13,10 @@ import net.minecraft.resources.Identifier;
  * everything vanilla has been extracted, in a stratum of its own: a notification is never hidden
  * behind the thing the player happens to be looking at.
  *
- * <p>This browser hosts nothing but the floating layer, so there is no gate to keep: whatever
- * its texture holds is toast pixels over transparency, and the worst a stale frame can show is
- * an outdated toast.
+ * <p>This browser hosts nothing but layers meant to float over the world, so there is no gate to
+ * keep: whatever its texture holds is drawn over transparency, and the worst a stale frame can
+ * show is an outdated toast. It shares the platform's frame path, so on the GPU path it shares
+ * MCEF's silent frame drops as well - one toggle switches both layers to software.
  */
 public final class BrowserOverlay {
 

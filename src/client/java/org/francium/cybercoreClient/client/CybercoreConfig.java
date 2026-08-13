@@ -25,9 +25,9 @@ public final class CybercoreConfig {
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
 
     /**
-     * GPU-shared frames for the platform browser by default - they carry the monitor's full
-     * refresh rate. Machines where the GPU path misbehaves switch to software frames on the
-     * site's settings page, or here. The overlay browser is always software.
+     * GPU-shared frames by default - they carry the monitor's full refresh rate. Machines where
+     * the GPU path misbehaves switch to software frames on the site's settings page, or here.
+     * The switch covers both browsers at once; they never run on different paths.
      */
     private static final boolean DEFAULT_ACCELERATED_PAINT = true;
 
