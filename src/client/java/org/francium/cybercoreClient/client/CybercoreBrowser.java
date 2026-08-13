@@ -19,8 +19,17 @@ import java.awt.Rectangle;
  */
 final class CybercoreBrowser extends MCEFBrowser {
 
-    CybercoreBrowser(MCEFClient client, String url, boolean transparent, MCEFBrowserSettings settings) {
+    /** Fixed at creation, like the rendering path itself: the two may differ per browser. */
+    private final boolean acceleratedFrames;
+
+    CybercoreBrowser(MCEFClient client, String url, boolean transparent, MCEFBrowserSettings settings,
+                     boolean acceleratedFrames) {
         super(client, url, transparent, settings);
+        this.acceleratedFrames = acceleratedFrames;
+    }
+
+    boolean isAcceleratedFrames() {
+        return acceleratedFrames;
     }
 
     // ---- HiDPI ------------------------------------------------------------------------------
@@ -32,30 +41,35 @@ final class CybercoreBrowser extends MCEFBrowser {
     // the logical size and raster at full native resolution - which is what a retina display
     // needs to look sharp.
     //
-    // Software rendering only. The accelerated path's frame filter accepts a frame after any size
-    // change only when its damage covers the whole texture, and with a scale factor in play the
-    // sizes it compares stop lining up - every frame is then dropped in silence and the screen
-    // stays empty for good. So on accelerated the browser behaves exactly as stock, scale 1 and
-    // the zoom fallback, and true HiDPI stays where it is known to work.
+    // Software rendering only, PER BROWSER: the accelerated path's frame filter accepts a frame
+    // after any size change only when its damage covers the whole texture, and with a scale
+    // factor in play the sizes it compares stop lining up - every frame is then dropped in
+    // silence and the screen stays empty for good. So an accelerated browser behaves exactly as
+    // stock, scale 1 and the zoom fallback, while a software one gets true HiDPI.
 
-    private static boolean hiDpi() {
-        return !McefBootstrap.isAcceleratedPaint();
+    private boolean hiDpi() {
+        return !acceleratedFrames;
     }
 
-    private static int toDip(int pixels) {
+    private int toDip(int pixels) {
         if (!hiDpi()) {
             return pixels;
         }
+        return softwareDip(pixels);
+    }
+
+    private static int softwareDip(int pixels) {
         return Math.max(1, Math.round(pixels / CybercoreClientClient.displayScale()));
     }
 
     /**
-     * Framebuffer pixels to the coordinate space a page sees (its client coordinates) - the same
-     * conversion every mouse event goes through, exposed for the toast hit-test, which compares
-     * mouse positions against rectangles the page reported in its own coordinates.
+     * Framebuffer pixels to the coordinate space the OVERLAY page sees (its client coordinates) -
+     * the same conversion its mouse events go through, exposed for the toast hit-test, which
+     * compares mouse positions against rectangles that page reported in its own coordinates.
+     * The overlay browser always runs on software frames, so this is always the DIP conversion.
      */
-    static int toBrowserCoord(int pixels) {
-        return toDip(pixels);
+    static int toOverlayCoord(int pixels) {
+        return softwareDip(pixels);
     }
 
     @Override

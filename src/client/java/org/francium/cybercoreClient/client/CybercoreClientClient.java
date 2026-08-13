@@ -267,6 +267,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserConsoleLog.register();
             BrowserCrashGuard.register();
             BrowserToastRectsBridge.register();
+            BrowserToastForwardBridge.register();
             BrowserAccelBridge.register();
             registerZoomLoadHandler();
             // Registered before the first browser exists, so even a front-end that is already
@@ -283,11 +284,16 @@ public class CybercoreClientClient implements ClientModInitializer {
             platformShown = false;
             // Boots straight on the platform route, permanently expanded: the very first open is
             // as instant as every later one, and state (route, scroll, forms) survives closes.
-            uiBrowser = createBrowser(platformBootUrl());
+            uiBrowser = createBrowser(platformBootUrl(), McefBootstrap.isAcceleratedPaint());
         }
         if (overlayBrowser == null) {
             BrowserToastRectsBridge.reset();
-            overlayBrowser = createBrowser(overlayBootUrl());
+            // ALWAYS software frames: MCEF's GPU path can lose a shared frame without a trace
+            // (importFrame returning null), and a lost frame here is a notification the player
+            // never saw. The page is a handful of toasts - software at 60 fps costs nothing, and
+            // the layer works identically on every GPU and driver. The GPU/CPU choice below
+            // affects only the heavy platform browser.
+            overlayBrowser = createBrowser(overlayBootUrl(), false);
         }
     }
 
@@ -354,8 +360,8 @@ public class CybercoreClientClient implements ClientModInitializer {
 
     static boolean isToastAtFb(int fbX, int fbY) {
         return BrowserToastRectsBridge.hit(
-                CybercoreBrowser.toBrowserCoord(fbX),
-                CybercoreBrowser.toBrowserCoord(fbY));
+                CybercoreBrowser.toOverlayCoord(fbX),
+                CybercoreBrowser.toOverlayCoord(fbY));
     }
 
     static int toFbX(double guiX) {
@@ -383,11 +389,11 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static int lastAppliedFrameRate;
 
     /**
-     * The monitor's own refresh rate, capped by what the active rendering path can sustain.
+     * The monitor's own refresh rate, capped by what the given rendering path can sustain.
      * Frames above the refresh rate can never be seen, frames below it are visible judder.
      */
-    private static int maxFrameRate() {
-        int pathCap = McefBootstrap.isAcceleratedPaint() ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
+    private static int frameRateFor(boolean acceleratedFrames) {
+        int pathCap = acceleratedFrames ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
         int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
         if (refreshRate <= 0) {
             return Math.min(FALLBACK_BROWSER_FPS, pathCap);
@@ -400,11 +406,11 @@ public class CybercoreClientClient implements ClientModInitializer {
         if (uiBrowser == null) {
             return;
         }
-        int target = maxFrameRate();
+        int target = frameRateFor(uiBrowser.isAcceleratedFrames());
         if (target != lastAppliedFrameRate) {
             uiBrowser.setWindowlessFrameRate(target);
             if (overlayBrowser != null) {
-                overlayBrowser.setWindowlessFrameRate(target);
+                overlayBrowser.setWindowlessFrameRate(frameRateFor(false));
             }
             lastAppliedFrameRate = target;
         }
@@ -473,14 +479,17 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         double userScale = CybercoreConfig.getBrowserScalePercent() / 100.0;
-        double targetScale = McefBootstrap.isAcceleratedPaint() ? contentScale * userScale : userScale;
-        double zoom = Math.log(targetScale) / Math.log(1.2);
-        if (Math.abs(zoom - lastAppliedZoom) > 0.001) {
-            uiBrowser.setZoomLevel(zoom);
+        // The paths differ per browser: a software one already carries the OS scale as its
+        // device scale factor, an accelerated one runs at scale 1 and needs it folded into zoom.
+        double uiScale = uiBrowser.isAcceleratedFrames() ? contentScale * userScale : userScale;
+        double uiZoom = Math.log(uiScale) / Math.log(1.2);
+        double overlayZoom = Math.log(userScale) / Math.log(1.2);
+        if (Math.abs(uiZoom - lastAppliedZoom) > 0.001) {
+            uiBrowser.setZoomLevel(uiZoom);
             if (overlayBrowser != null) {
-                overlayBrowser.setZoomLevel(zoom);
+                overlayBrowser.setZoomLevel(overlayZoom);
             }
-            lastAppliedZoom = zoom;
+            lastAppliedZoom = uiZoom;
         }
     }
 
@@ -546,16 +555,17 @@ public class CybercoreClientClient implements ClientModInitializer {
         }
     }
 
-    private static CybercoreBrowser createBrowser(String url) {
+    private static CybercoreBrowser createBrowser(String url, boolean acceleratedFrames) {
         // Built by hand instead of MCEF.createBrowser, which hardwires the base class: ours is the
         // same browser plus HiDPI and richer wheel input. shared_texture is only requested when
         // the platform probe accepted it - CEF ignores an unsupported request silently.
-        int frameRate = maxFrameRate();
+        int frameRate = frameRateFor(acceleratedFrames);
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
                 url,
                 true,
-                new MCEFBrowserSettings(frameRate, McefBootstrap.isAcceleratedPaint())
+                new MCEFBrowserSettings(frameRate, acceleratedFrames),
+                acceleratedFrames
         );
         b.setCloseAllowed();
         b.createImmediately();

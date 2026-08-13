@@ -20,7 +20,10 @@ public final class CybercoreConfig {
     private static final String KEY_BASE_URL = "baseUrl";
     private static final String KEY_SWAP_RED_BLUE = "swapRedBlue";
     private static final String KEY_BROWSER_SCALE = "browserScalePercent";
-    private static final String KEY_ACCELERATED_PAINT = "acceleratedPaint";
+    // Deliberately NOT the old "acceleratedPaint" name: that key was persisted as false during
+    // the opt-in era, and it would pin every early tester to software frames forever. A fresh
+    // key means everyone re-enters the GPU-by-default world; the site toggle remains the way out.
+    private static final String KEY_ACCELERATED_PAINT = "gpuFrames";
 
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
 
