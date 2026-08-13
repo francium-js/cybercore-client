@@ -22,54 +22,52 @@ final class CybercoreBrowser extends MCEFBrowser {
     /** Fixed at creation, like the rendering path itself: the two may differ per browser. */
     private final boolean acceleratedFrames;
 
+    /** True DIP scaling (device scale factor + coordinate conversion) vs the zoom fallback. */
+    private final boolean dipScaling;
+
     CybercoreBrowser(MCEFClient client, String url, boolean transparent, MCEFBrowserSettings settings,
-                     boolean acceleratedFrames) {
+                     boolean acceleratedFrames, boolean dipScaling) {
         super(client, url, transparent, settings);
         this.acceleratedFrames = acceleratedFrames;
+        this.dipScaling = dipScaling;
     }
 
     boolean isAcceleratedFrames() {
         return acceleratedFrames;
     }
 
+    boolean usesDipScaling() {
+        return dipScaling;
+    }
+
     // ---- HiDPI ------------------------------------------------------------------------------
     //
     // The mod's callers all speak framebuffer pixels; Chromium, given a device scale factor,
     // expects view sizes and mouse coordinates in logical (DIP) units and rasters them scaled.
-    // Converting here, at the boundary, keeps every caller unchanged and replaces the old zoom
-    // hack: zoom only enlarged a 1x layout, while a real scale factor makes Chromium lay out at
-    // the logical size and raster at full native resolution - which is what a retina display
-    // needs to look sharp.
+    // Converting here, at the boundary, keeps every caller unchanged and replaces the zoom hack:
+    // zoom only enlarges a 1x layout, while a real scale factor makes Chromium lay out at the
+    // logical size and raster at full native resolution - what a retina display needs.
     //
-    // Software rendering only, PER BROWSER: the accelerated path's frame filter accepts a frame
-    // after any size change only when its damage covers the whole texture, and with a scale
-    // factor in play the sizes it compares stop lining up - every frame is then dropped in
-    // silence and the screen stays empty for good. So an accelerated browser behaves exactly as
-    // stock, scale 1 and the zoom fallback, while a software one gets true HiDPI.
-
-    private boolean hiDpi() {
-        return !acceleratedFrames;
-    }
+    // PER BROWSER, and only where proven: the accelerated path's frame filter chokes on a scale
+    // factor (sizes stop lining up, frames drop in silence), and on Windows the software path
+    // was seen ignoring the reported factor too - pages came out laid out in raw framebuffer
+    // pixels, visibly small. So true DIP stays a macOS-software affair; everything else runs at
+    // scale 1 with the OS scale folded into page zoom (see syncBrowserZoom).
 
     private int toDip(int pixels) {
-        if (!hiDpi()) {
+        if (!dipScaling) {
             return pixels;
         }
-        return softwareDip(pixels);
-    }
-
-    private static int softwareDip(int pixels) {
         return Math.max(1, Math.round(pixels / CybercoreClientClient.displayScale()));
     }
 
     /**
-     * Framebuffer pixels to the coordinate space the OVERLAY page sees (its client coordinates) -
-     * the same conversion its mouse events go through, exposed for the toast hit-test, which
-     * compares mouse positions against rectangles that page reported in its own coordinates.
-     * The overlay browser always runs on software frames, so this is always the DIP conversion.
+     * Framebuffer pixels to the coordinate space this page sees (its client coordinates) - the
+     * same conversion its mouse events go through. The toast hit-test compares mouse positions
+     * against rectangles the overlay page reported in these coordinates.
      */
-    static int toOverlayCoord(int pixels) {
-        return softwareDip(pixels);
+    int toClientCoord(int pixels) {
+        return toDip(pixels);
     }
 
     @Override
@@ -130,7 +128,7 @@ final class CybercoreBrowser extends MCEFBrowser {
 
     @Override
     public boolean getScreenInfo(CefBrowser browser, CefScreenInfo screenInfo) {
-        if (!hiDpi()) {
+        if (!dipScaling) {
             return super.getScreenInfo(browser, screenInfo);
         }
         float scale = CybercoreClientClient.displayScale();

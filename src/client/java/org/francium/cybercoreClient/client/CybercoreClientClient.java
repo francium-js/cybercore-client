@@ -2,6 +2,7 @@ package org.francium.cybercoreClient.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import net.ccbluex.liquidbounce.mcef.MCEF;
+import net.ccbluex.liquidbounce.mcef.MCEFPlatform;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowser;
 import net.ccbluex.liquidbounce.mcef.cef.MCEFBrowserSettings;
 import net.fabricmc.api.ClientModInitializer;
@@ -290,9 +291,9 @@ public class CybercoreClientClient implements ClientModInitializer {
             BrowserToastRectsBridge.reset();
             // ALWAYS software frames: MCEF's GPU path can lose a shared frame without a trace
             // (importFrame returning null), and a lost frame here is a notification the player
-            // never saw. The page is a handful of toasts - software at 60 fps costs nothing, and
-            // the layer works identically on every GPU and driver. The GPU/CPU choice below
-            // affects only the heavy platform browser.
+            // never saw. The page is a handful of toasts, so software costs almost nothing even
+            // at the full refresh rate - its damage is a toast-sized rectangle, not the screen.
+            // The GPU/CPU choice affects only the heavy platform browser.
             overlayBrowser = createBrowser(overlayBootUrl(), false);
         }
     }
@@ -359,9 +360,13 @@ public class CybercoreClientClient implements ClientModInitializer {
     }
 
     static boolean isToastAtFb(int fbX, int fbY) {
+        CybercoreBrowser overlay = overlayBrowser;
+        if (overlay == null) {
+            return false;
+        }
         return BrowserToastRectsBridge.hit(
-                CybercoreBrowser.toOverlayCoord(fbX),
-                CybercoreBrowser.toOverlayCoord(fbY));
+                overlay.toClientCoord(fbX),
+                overlay.toClientCoord(fbY));
     }
 
     static int toFbX(double guiX) {
@@ -389,11 +394,14 @@ public class CybercoreClientClient implements ClientModInitializer {
     private static int lastAppliedFrameRate;
 
     /**
-     * The monitor's own refresh rate, capped by what the given rendering path can sustain.
-     * Frames above the refresh rate can never be seen, frames below it are visible judder.
+     * One tempo for both browsers, set by the platform's path: the notification layer must feel
+     * exactly as fluid as the platform beside it, and its software cost is tiny (its damage is a
+     * toast-sized rectangle, not the screen), so it can afford the platform's rate. Only when
+     * the platform itself is on software frames does the CPU cap apply - a full-screen readback
+     * chasing a 180 Hz monitor starves the game (~15 MB per frame at 1440p).
      */
-    private static int frameRateFor(boolean acceleratedFrames) {
-        int pathCap = acceleratedFrames ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
+    private static int frameRateFor(boolean uiAcceleratedFrames) {
+        int pathCap = uiAcceleratedFrames ? MAX_BROWSER_FPS : SOFTWARE_MAX_FPS;
         int refreshRate = Minecraft.getInstance().getWindow().getRefreshRate();
         if (refreshRate <= 0) {
             return Math.min(FALLBACK_BROWSER_FPS, pathCap);
@@ -410,7 +418,7 @@ public class CybercoreClientClient implements ClientModInitializer {
         if (target != lastAppliedFrameRate) {
             uiBrowser.setWindowlessFrameRate(target);
             if (overlayBrowser != null) {
-                overlayBrowser.setWindowlessFrameRate(frameRateFor(false));
+                overlayBrowser.setWindowlessFrameRate(target);
             }
             lastAppliedFrameRate = target;
         }
@@ -479,18 +487,27 @@ public class CybercoreClientClient implements ClientModInitializer {
             return;
         }
         double userScale = CybercoreConfig.getBrowserScalePercent() / 100.0;
-        // The paths differ per browser: a software one already carries the OS scale as its
-        // device scale factor, an accelerated one runs at scale 1 and needs it folded into zoom.
-        double uiScale = uiBrowser.isAcceleratedFrames() ? contentScale * userScale : userScale;
-        double uiZoom = Math.log(uiScale) / Math.log(1.2);
-        double overlayZoom = Math.log(userScale) / Math.log(1.2);
+        // Per browser: one with true DIP scaling already carries the OS scale as its device
+        // scale factor and only needs the player's multiplier; one at scale 1 (accelerated, or
+        // software outside macOS) needs the OS scale folded in too.
+        double uiZoom = zoomFor(uiBrowser, userScale);
         if (Math.abs(uiZoom - lastAppliedZoom) > 0.001) {
             uiBrowser.setZoomLevel(uiZoom);
+            double overlayZoom = 0;
             if (overlayBrowser != null) {
+                overlayZoom = zoomFor(overlayBrowser, userScale);
                 overlayBrowser.setZoomLevel(overlayZoom);
             }
             lastAppliedZoom = uiZoom;
+            LOGGER.info("Browser zoom applied: ui={} overlay={} (contentScale={}, userScale={}).",
+                    String.format("%.2f", uiZoom), String.format("%.2f", overlayZoom),
+                    contentScale, userScale);
         }
+    }
+
+    private static double zoomFor(CybercoreBrowser browser, double userScale) {
+        double target = browser.usesDipScaling() ? userScale : contentScale * userScale;
+        return Math.log(target) / Math.log(1.2);
     }
 
     /**
@@ -559,13 +576,19 @@ public class CybercoreClientClient implements ClientModInitializer {
         // Built by hand instead of MCEF.createBrowser, which hardwires the base class: ours is the
         // same browser plus HiDPI and richer wheel input. shared_texture is only requested when
         // the platform probe accepted it - CEF ignores an unsupported request silently.
-        int frameRate = frameRateFor(acceleratedFrames);
+        // Both browsers run at the platform path's tempo (see frameRateFor).
+        int frameRate = frameRateFor(McefBootstrap.isAcceleratedPaint());
+        // True DIP scaling only where it is proven to work: macOS software rendering. Windows
+        // software was seen laying pages out in raw framebuffer pixels regardless of the
+        // reported factor, so everywhere else the OS scale rides on zoom instead.
+        boolean dipScaling = !acceleratedFrames && MCEFPlatform.getPlatform().isMacOS();
         CybercoreBrowser b = new CybercoreBrowser(
                 MCEF.INSTANCE.getClient(),
                 url,
                 true,
                 new MCEFBrowserSettings(frameRate, acceleratedFrames),
-                acceleratedFrames
+                acceleratedFrames,
+                dipScaling
         );
         b.setCloseAllowed();
         b.createImmediately();
