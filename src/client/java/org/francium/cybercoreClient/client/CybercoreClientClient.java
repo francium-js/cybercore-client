@@ -23,17 +23,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Two browsers, one page each, and no shared texture between the two worlds.
+ * Two MCEF browsers, one web app each, no shared state between the two layers.
  *
- * <p>The overlay browser hosts nothing but the floating in-world layer (toasts, glitch effects)
- * and is painted on top of everything the game shows, always - it never navigates, never
- * collapses, never carries the platform. The UI browser hosts the whole platform, permanently
- * expanded, and is painted exclusively while {@link BrowserScreen} is open. "The platform stuck
- * over the world" is thereby impossible by construction: the platform's texture is simply never
- * drawn outside its screen, however the frames flow.
+ * <p><b>Overlay browser</b> ({@code ccRole=overlay}): nothing but the floating notification
+ * layer. Painted on top of everything the game shows - world, chat, menus, loading screens and
+ * the platform screen itself - always. Runs on software frames so a notification can never be
+ * lost to a GPU driver quirk.
  *
- * <p>Clicks over a toast are routed to the overlay browser (the front-end reports live toast
- * rectangles - see BrowserToastRectsBridge), everything else goes to the UI browser.
+ * <p><b>UI browser</b> ({@code ccRole=platform}): the whole platform, permanently expanded,
+ * state preserved across closes. Its texture is painted exclusively while {@link BrowserScreen}
+ * is open, so "the platform stuck over the world" is impossible by construction. Runs on
+ * GPU-shared frames by default (config/site toggle: {@code gpuFrames}).
+ *
+ * <p>Input: clicks and hover inside a toast's reported rectangle go to the overlay browser
+ * (BrowserToastRectsBridge holds the live map), everything else goes to the UI browser or the
+ * screen under the cursor.
  */
 public class CybercoreClientClient implements ClientModInitializer {
 

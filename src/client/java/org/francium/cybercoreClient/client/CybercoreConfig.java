@@ -20,19 +20,14 @@ public final class CybercoreConfig {
     private static final String KEY_BASE_URL = "baseUrl";
     private static final String KEY_SWAP_RED_BLUE = "swapRedBlue";
     private static final String KEY_BROWSER_SCALE = "browserScalePercent";
-    // Deliberately NOT the old "acceleratedPaint" name: that key was persisted as false during
-    // the opt-in era, and it would pin every early tester to software frames forever. A fresh
-    // key means everyone re-enters the GPU-by-default world; the site toggle remains the way out.
     private static final String KEY_ACCELERATED_PAINT = "gpuFrames";
 
     private static final boolean DEFAULT_SWAP_RED_BLUE = true;
 
     /**
-     * GPU-shared frames by default: they carry the full monitor refresh rate for free, and since
-     * the collapse-ack gate (CybercoreClientClient.mayDrawOverlay) a lost frame can no longer
-     * freeze a stale platform over the world - MCEF's silent import failures now cost at most a
-     * few delayed frames. Machines where the GPU path stays troublesome (weak iGPUs, exotic
-     * drivers) switch to software frames right on the site's settings page, or here.
+     * GPU-shared frames for the platform browser by default - they carry the monitor's full
+     * refresh rate. Machines where the GPU path misbehaves switch to software frames on the
+     * site's settings page, or here. The overlay browser is always software.
      */
     private static final boolean DEFAULT_ACCELERATED_PAINT = true;
 
@@ -43,10 +38,9 @@ public final class CybercoreConfig {
     private static volatile String baseUrl = DEFAULT_BASE_URL;
 
     /**
-     * The player's manual browser scale, in percent, on top of the OS content scale. The escape
-     * hatch for machines where the auto-detected scale is wrong (Linux Xft.dpi/Wayland lying,
-     * mismatched Windows laptop setups): set from the site's settings page over the console
-     * channel (see BrowserScaleBridge) and persisted here so it applies from game launch.
+     * The player's manual browser scale (percent) on top of the OS content scale - the escape
+     * hatch for machines where the auto-detected scale is wrong. Set from the site's settings
+     * page (BrowserScaleBridge), persisted so it applies from launch.
      */
     private static volatile int browserScalePercent = DEFAULT_BROWSER_SCALE_PERCENT;
 

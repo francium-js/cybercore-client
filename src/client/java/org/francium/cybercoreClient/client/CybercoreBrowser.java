@@ -42,17 +42,14 @@ final class CybercoreBrowser extends MCEFBrowser {
 
     // ---- HiDPI ------------------------------------------------------------------------------
     //
-    // The mod's callers all speak framebuffer pixels; Chromium, given a device scale factor,
-    // expects view sizes and mouse coordinates in logical (DIP) units and rasters them scaled.
-    // Converting here, at the boundary, keeps every caller unchanged and replaces the zoom hack:
-    // zoom only enlarges a 1x layout, while a real scale factor makes Chromium lay out at the
-    // logical size and raster at full native resolution - what a retina display needs.
+    // Callers speak framebuffer pixels; a DIP-scaled browser converts sizes and mouse
+    // coordinates to logical units here, at the boundary, and reports the OS scale as the
+    // device scale factor - Chromium then rasters at full native resolution (sharp on retina).
     //
-    // PER BROWSER, and only where proven: the accelerated path's frame filter chokes on a scale
-    // factor (sizes stop lining up, frames drop in silence), and on Windows the software path
-    // was seen ignoring the reported factor too - pages came out laid out in raw framebuffer
-    // pixels, visibly small. So true DIP stays a macOS-software affair; everything else runs at
-    // scale 1 with the OS scale folded into page zoom (see syncBrowserZoom).
+    // Only where proven to work: the accelerated path's frame filter chokes on a scale factor,
+    // and Windows software rendering ignores the reported factor outright. So true DIP is a
+    // macOS-software affair; everyone else runs at scale 1 with the OS scale folded into page
+    // zoom (see syncBrowserZoom).
 
     private int toDip(int pixels) {
         if (!dipScaling) {
