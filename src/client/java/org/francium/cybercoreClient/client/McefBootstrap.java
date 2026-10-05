@@ -6,12 +6,19 @@ import net.ccbluex.liquidbounce.mcef.MCEFDownloadManager;
 import net.ccbluex.liquidbounce.mcef.MCEFPlatform;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import org.cef.CefApp;
+import org.cef.browser.CefBrowser;
+import org.cef.callback.CefCompletionCallback;
+import org.cef.handler.CefLifeSpanHandlerAdapter;
+import org.cef.network.CefCookieManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -113,6 +120,7 @@ public final class McefBootstrap {
             return;
         }
 
+        registerLifeSpanTracking();
         resolveAccelerationSupport();
         finish(onReady, true);
     }
@@ -184,9 +192,138 @@ public final class McefBootstrap {
         }
     }
 
-    static void shutdown() {
-        if (isReady()) {
-            MCEF.INSTANCE.shutdown();
+    /** How often the cookie store is pushed to disk, in client ticks (5 s). */
+    private static final int COOKIE_FLUSH_INTERVAL_TICKS = 100;
+
+    /** How long quitting may wait for CEF to close the profile cleanly. */
+    private static final long SHUTDOWN_TIMEOUT_MS = 3000;
+
+    private static int ticksSinceCookieFlush = 0;
+
+    /** CEF's native side guards a null callback upstream; an empty one does not depend on that. */
+    private static final CefCompletionCallback NO_OP_COMPLETION = () -> {
+    };
+
+    /**
+     * Pushes pending cookie writes to disk. Chromium batches them for up to 30 seconds, and the
+     * backend rotates the refresh token on every refresh - so a game killed from the task manager
+     * (or a PC losing power) inside that window comes back with a token the server already
+     * retired, and the player is signed out. A flush with nothing pending is a no-op.
+     */
+    static void tickCookieFlush() {
+        if (!isReady() || ++ticksSinceCookieFlush < COOKIE_FLUSH_INTERVAL_TICKS) {
+            return;
         }
+        ticksSinceCookieFlush = 0;
+        try {
+            CefCookieManager.getGlobalManager().flushStore(NO_OP_COMPLETION);
+        } catch (Throwable t) {
+            LOGGER.debug("Cookie flush failed.", t);
+        }
+    }
+
+    /**
+     * Every browser CEF has not finished closing: ours from the moment they are constructed (so
+     * one still being created counts too), anything else from onAfterCreated. onBeforeClose is
+     * the last callback a browser gets, and it is where JCEF drops it from the client as well.
+     */
+    private static final Set<CefBrowser> liveBrowsers = ConcurrentHashMap.newKeySet();
+
+    /** Called for each browser we construct, before it is created. */
+    static void trackBrowser(CefBrowser browser) {
+        liveBrowsers.add(browser);
+    }
+
+    private static void registerLifeSpanTracking() {
+        // JCEF keeps a single life span handler per client; neither MCEF nor the rest of the mod
+        // installs one, so this slot is ours.
+        MCEF.INSTANCE.getClient().getHandle().addLifeSpanHandler(new CefLifeSpanHandlerAdapter() {
+            @Override
+            public void onAfterCreated(CefBrowser browser) {
+                liveBrowsers.add(browser);
+            }
+
+            @Override
+            public void onBeforeClose(CefBrowser browser) {
+                liveBrowsers.remove(browser);
+            }
+        });
+    }
+
+    /**
+     * Closes the profile the way Chromium expects, so cookies and storage reach the disk and the
+     * profile is not marked as crashed.
+     *
+     * <p>MCEF's shutdown alone never gets there: it only asks the browsers to close, and JCEF
+     * runs CefShutdown from the last close callback - which needs the message loop, and nothing
+     * pumps it once the game stops rendering. Pumping after MCEF's shutdown would not do either:
+     * CefShutdown would then run from inside a callback, nested in the very loop it tears down.
+     *
+     * <p>So the browsers are closed and the loop pumped here until all of them are gone, and only
+     * then is MCEF shut down. With no browsers left, {@code CefApp.dispose()} calls CefShutdown
+     * directly, on this thread, outside the loop. If they do not close in time nothing changes
+     * from before: shutting down with a browser still alive is exactly what must not happen.
+     */
+    static void shutdown() {
+        if (!isReady()) {
+            return;
+        }
+        // CEF's UI thread is the render thread (that is where the loop is pumped). Anywhere else,
+        // leave it to MCEF as before.
+        if (!Minecraft.getInstance().isSameThread()) {
+            LOGGER.warn("CEF shutdown requested off the render thread; skipping the clean close.");
+            MCEF.INSTANCE.shutdown();
+            return;
+        }
+
+        try {
+            CefCookieManager.getGlobalManager().flushStore(NO_OP_COMPLETION);
+        } catch (Throwable t) {
+            LOGGER.debug("Cookie flush before shutdown failed.", t);
+        }
+
+        for (CefBrowser browser : liveBrowsers) {
+            try {
+                // A no-op for the ones already closing.
+                browser.close(true);
+            } catch (Throwable t) {
+                LOGGER.debug("Closing a browser for shutdown failed.", t);
+            }
+        }
+
+        if (!pumpUntilBrowsersClosed()) {
+            LOGGER.warn("{} browser(s) did not close within {} ms; quitting without a clean CEF "
+                    + "shutdown.", liveBrowsers.size(), SHUTDOWN_TIMEOUT_MS);
+            return;
+        }
+
+        MCEF.INSTANCE.shutdown();
+
+        if (CefApp.getState() == CefApp.CefAppState.TERMINATED) {
+            LOGGER.info("CEF shut down cleanly.");
+        } else {
+            LOGGER.warn("CEF did not terminate after shutdown (state {}).", CefApp.getState());
+        }
+    }
+
+    private static boolean pumpUntilBrowsersClosed() {
+        CefApp app = MCEF.INSTANCE.getApp().getHandle();
+        long deadline = System.currentTimeMillis() + SHUTDOWN_TIMEOUT_MS;
+        while (!liveBrowsers.isEmpty()) {
+            if (System.currentTimeMillis() > deadline) {
+                return false;
+            }
+            try {
+                app.N_DoMessageLoopWork();
+                Thread.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (Throwable t) {
+                LOGGER.warn("CEF message loop pump failed during shutdown.", t);
+                return false;
+            }
+        }
+        return true;
     }
 }

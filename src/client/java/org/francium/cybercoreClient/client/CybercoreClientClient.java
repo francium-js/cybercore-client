@@ -144,6 +144,7 @@ public class CybercoreClientClient implements ClientModInitializer {
             refreshDisplayScale(client);
             syncBrowserFrameRate();
             BrowserLoadGuard.tick();
+            McefBootstrap.tickCookieFlush();
             tickPageStateReassert();
 
             // The invariant: the platform is shown for as long as its screen is. Screens can
@@ -670,6 +671,7 @@ public class CybercoreClientClient implements ClientModInitializer {
                 dipScaling
         );
         b.setCloseAllowed();
+        McefBootstrap.trackBrowser(b);
         b.createImmediately();
         lastAppliedFrameRate = frameRate;
         return b;
